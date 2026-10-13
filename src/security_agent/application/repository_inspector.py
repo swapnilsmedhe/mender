@@ -1,4 +1,6 @@
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from security_agent.domain.finding import SecurityFinding
 from security_agent.tools.repository import RepositoryTools
@@ -7,33 +9,82 @@ from security_agent.tools.repository import RepositoryTools
 @dataclass(frozen=True)
 class RepositoryInspection:
     finding_id: str
-    inspected_file: str
-    component_matches: list[dict[str, str | int]]
-    version_matches: list[dict[str, str | int]]
-
-    @property
-    def is_consistent(self) -> bool:
-        return bool(self.component_matches and self.version_matches)
+    configuration: str
+    command_output: str
+    is_consistent: bool
 
 
 class RepositoryInspector:
-    def __init__(self, tools: RepositoryTools) -> None:
+    def __init__(
+        self,
+        tools: RepositoryTools,
+        configuration: str = "runtimeClasspath",
+        timeout_seconds: int = 120,
+    ) -> None:
         self.tools = tools
+        self.configuration = configuration
+        self.timeout_seconds = timeout_seconds
 
     def inspect(self, finding: SecurityFinding) -> RepositoryInspection:
-        # Confirm that the file supplied by the scanner exists and is readable.
-        self.tools.read_file(finding.file)
+        root = self.tools.root
 
-        component_matches = self.tools.search_code(
-            finding.component,
+        wrapper_name = (
+            "gradlew.bat" if __import__("os").name == "nt" else "gradlew"
         )
-        version_matches = self.tools.search_code(
-            finding.current_version,
+        wrapper = root / wrapper_name
+
+        if not wrapper.is_file():
+            raise FileNotFoundError(
+                f"Gradle wrapper not found: {wrapper}"
+            )
+
+        command = [
+            str(wrapper),
+            "dependencyInsight",
+            "--dependency",
+            finding.component,
+            "--configuration",
+            self.configuration,
+            "--console=plain",
+        ]
+
+        print(f"Running command: {' '.join(command)} in {root} ---------------")
+
+        try:
+            result = subprocess.run(
+                command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "Gradle dependency inspection timed out."
+            ) from exc
+
+        output = f"{result.stdout}\n{result.stderr}".strip()
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Gradle dependency inspection failed.\n"
+                f"Command: {' '.join(command)}\n"
+                f"{output}"
+            )
+
+        # Require both the component and reported version in Gradle's
+        # dependency report. This is an initial check, not a full parser
+        # for every Gradle output format.
+        consistent = (
+            finding.component.casefold() in output.casefold()
+            and finding.current_version in output
         )
 
         return RepositoryInspection(
             finding_id=finding.id,
-            inspected_file=finding.file,
-            component_matches=component_matches,
-            version_matches=version_matches,
+            configuration=self.configuration,
+            command_output=output,
+            is_consistent=consistent,
         )

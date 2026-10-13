@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default="HIGH",
         help="Finding severity.",
     )
+    parser.add_argument(
+        "--configuration",
+        default="runtimeClasspath",
+        help="Gradle configuration to inspect, e.g. runtimeClasspath or testRuntimeClasspath.",
+    )
     return parser.parse_args()
 
 
@@ -89,7 +94,10 @@ def main() -> int:
         orchestrator = SecurityRemediationOrchestrator(
             analyzer=FindingAnalyzer(),
             planner=RemediationPlanner(),
-            inspector=RepositoryInspector(tools),
+            inspector=RepositoryInspector(
+                RepositoryTools(repository_root),
+                configuration=args.configuration,
+            ),
         )
 
         plan = orchestrator.run(finding)
