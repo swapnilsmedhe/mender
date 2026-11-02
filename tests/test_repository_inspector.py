@@ -1,4 +1,9 @@
+
+import subprocess
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from security_agent.application.repository_inspector import (
     RepositoryInspector,
@@ -21,50 +26,122 @@ def make_finding() -> SecurityFinding:
         current_version="2.15.2",
         fixed_versions=["2.17.3"],
         repository="sample-repo",
-        file="build.gradle.kts",
+        file="gradle/libs.versions.toml",
     )
 
 
-def test_inspector_finds_component_and_version(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "build.gradle.kts").write_text(
-        'implementation("com.example:jackson-databind:2.15.2")\n',
-        encoding="utf-8",
+@pytest.fixture
+def inspector(tmp_path: Path) -> RepositoryInspector:
+    # The inspector checks for the Gradle wrapper's existence.
+    wrapper = tmp_path / "gradlew"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    return RepositoryInspector(
+        tools=RepositoryTools(tmp_path),
+        configuration="runtimeClasspath",
     )
 
-    inspector = RepositoryInspector(RepositoryTools(tmp_path))
 
-    result = inspector.inspect(make_finding())
+def test_inspector_verifies_dependency(inspector):
+    gradle_output = """
+    com.fasterxml.jackson.core:jackson-databind:2.15.2
+    """
+
+    with patch(
+        "security_agent.application.repository_inspector.subprocess.run"
+    ) as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=gradle_output,
+            stderr="",
+        )
+
+        result = inspector.inspect(make_finding())
 
     assert result.finding_id == "BD-12345"
-    assert result.is_consistent
-    assert result.inspected_file == "build.gradle.kts"
+    assert result.configuration == "runtimeClasspath"
+    assert result.is_consistent is True
 
 
-def test_inspector_detects_missing_component(
+def test_inspector_rejects_missing_dependency(inspector):
+    gradle_output = """
+    com.fasterxml.jackson.core:jackson-databind:2.16.0
+    """
+
+    with patch(
+        "security_agent.application.repository_inspector.subprocess.run"
+    ) as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=gradle_output,
+            stderr="",
+        )
+
+        result = inspector.inspect(make_finding())
+
+    assert result.is_consistent is False
+
+
+def test_inspector_uses_gradle_dependency_insight(inspector):
+    with patch(
+        "security_agent.application.repository_inspector.subprocess.run"
+    ) as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="jackson-databind:2.15.2",
+            stderr="",
+        )
+
+        inspector.inspect(make_finding())
+
+        command = mock_run.call_args.kwargs.get("args")
+        if command is None:
+            command = mock_run.call_args.args[0]
+
+        assert "dependencyInsight" in command
+        assert "--dependency" in command
+        assert "jackson-databind" in command
+        assert "--configuration" in command
+        assert "runtimeClasspath" in command
+
+
+def test_inspector_raises_when_gradle_fails(inspector):
+    with patch(
+        "security_agent.application.repository_inspector.subprocess.run"
+    ) as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="Gradle build failed",
+        )
+
+        with pytest.raises(RuntimeError, match="Gradle dependency inspection failed"):
+            inspector.inspect(make_finding())
+
+
+def test_inspector_raises_when_gradle_times_out(inspector):
+    with patch(
+        "security_agent.application.repository_inspector.subprocess.run"
+    ) as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd="gradlew",
+            timeout=120,
+        )
+
+        with pytest.raises(RuntimeError, match="timed out"):
+            inspector.inspect(make_finding())
+
+
+def test_inspector_raises_when_gradle_wrapper_missing(
     tmp_path: Path,
-) -> None:
-    (tmp_path / "build.gradle.kts").write_text(
-        'implementation("com.example:other-library:2.15.2")\n',
-        encoding="utf-8",
+):
+    inspector = RepositoryInspector(
+        tools=RepositoryTools(tmp_path),
     )
 
-    inspector = RepositoryInspector(RepositoryTools(tmp_path))
-
-    result = inspector.inspect(make_finding())
-
-    assert not result.component_matches
-    assert not result.is_consistent
-
-
-def test_inspector_rejects_missing_finding_file(
-    tmp_path: Path,
-) -> None:
-    inspector = RepositoryInspector(RepositoryTools(tmp_path))
-
-    try:
+    with pytest.raises(FileNotFoundError, match="Gradle wrapper not found"):
         inspector.inspect(make_finding())
-        assert False, "Expected missing-file error"
-    except ValueError as exc:
-        assert "regular file" in str(exc)
