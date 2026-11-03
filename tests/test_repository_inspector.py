@@ -101,7 +101,7 @@ def test_inspector_uses_gradle_dependency_insight(inspector):
         if command is None:
             command = mock_run.call_args.args[0]
 
-        assert "dependencyInsight" in command
+        assert ":app:dependencyInsight" in command
         assert "--dependency" in command
         assert "jackson-databind" in command
         assert "--configuration" in command

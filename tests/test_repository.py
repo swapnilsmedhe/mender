@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 import pytest
@@ -105,21 +104,19 @@ def test_search_code_rejects_empty_query(repository: Path) -> None:
     with pytest.raises(ValueError, match="cannot be empty"):
         tools.search_code("")
 
-
-def test_read_file_rejects_missing_file(repository: Path) -> None:
+def test_read_file_rejects_missing_file(repository):
     tools = RepositoryTools(repository)
-
-    with pytest.raises(ValueError, match="regular file"):
+    with pytest.raises(FileNotFoundError, match="File not found"):
         tools.read_file("missing.txt")
 
-
-def test_read_file_rejects_oversized_file(repository: Path) -> None:
+def test_read_file_rejects_oversized_file(repository):
     tools = RepositoryTools(repository)
-    large_file = repository / "large.txt"
-    large_file.write_text("x", encoding="utf-8")
 
-    # Simulate the configured limit without creating a large file.
-    tools.MAX_FILE_SIZE = 0
+    oversized_file = repository / "large.txt"
+    oversized_file.write_text(
+        "x" * (RepositoryTools.MAX_FILE_SIZE + 1),
+        encoding="utf-8",
+        )
 
-    with pytest.raises(ValueError, match="1 MB read limit"):
+    with pytest.raises(ValueError, match="File exceeds maximum allowed size"):
         tools.read_file("large.txt")

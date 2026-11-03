@@ -1,8 +1,8 @@
-
 import argparse
 from pathlib import Path
 
 from security_agent.application.analyzer import FindingAnalyzer
+from security_agent.application.change_preview import ChangePreviewEngine
 from security_agent.application.orchestrator import (
     SecurityRemediationOrchestrator,
 )
@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--configuration",
         default="runtimeClasspath",
-        help="Gradle configuration to inspect, e.g. runtimeClasspath or testRuntimeClasspath.",
+        help="Gradle configuration to inspect.",
     )
     return parser.parse_args()
 
@@ -77,6 +77,7 @@ def main() -> int:
     repository_root = Path(args.repo).expanduser().resolve()
 
     try:
+        # Create one shared repository tools instance.
         tools = RepositoryTools(repository_root)
 
         finding = SecurityFinding(
@@ -91,22 +92,28 @@ def main() -> int:
             file=args.file,
         )
 
+        # Generate the remediation plan.
         orchestrator = SecurityRemediationOrchestrator(
             analyzer=FindingAnalyzer(),
             planner=RemediationPlanner(),
             inspector=RepositoryInspector(
-                RepositoryTools(repository_root),
+                tools,
                 configuration=args.configuration,
             ),
         )
 
         plan = orchestrator.run(finding)
 
-    except (ValueError, FileNotFoundError, OSError) as exc:
+        # Generate a read-only change preview.
+        preview_engine = ChangePreviewEngine(tools)
+        previews = preview_engine.create_preview(plan)
+
+    except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"Inspection failed: {exc}")
-        print("No remediation plan was generated.")
+        print("No remediation plan or preview was generated.")
         return 1
 
+    # Display finding information.
     print("Security Remediation Agent")
     print("=" * 32)
     print(f"Repository: {repository_root}")
@@ -117,6 +124,7 @@ def main() -> int:
     print(f"Current version: {finding.current_version}")
     print(f"Dependency file: {finding.file}")
 
+    # Display remediation plan.
     print("\nRemediation plan")
     print(f"Action: {plan.remediation_type.value}")
     print(f"Reason: {plan.reason}")
@@ -133,13 +141,34 @@ def main() -> int:
     else:
         print("No automatic changes proposed.")
 
+    # Display change previews.
+    print("\nChange Preview")
+    print("=" * 32)
+
+    if not previews:
+        print("No file changes require a preview.")
+    else:
+        for preview in previews:
+            print(f"\nFile: {preview.file}")
+            print(f"Dependency: {preview.dependency}")
+            print(f"Status: {preview.status.value}")
+            print(f"Message: {preview.message}")
+
+            if preview.diff:
+                print("\nProposed diff:")
+                print(preview.diff)
+            else:
+                print("No diff generated.")
+
+    # Display validation steps.
     if plan.validation_steps:
         print("\nProposed validation steps")
         for step in plan.validation_steps:
             print(f"- {step}")
 
     print("\nExecution status")
-    print("Inspection and planning completed; no files were modified.")
+    print("Preview completed; no files were modified.")
+
     return 0
 
 

@@ -78,19 +78,24 @@ class RepositoryTools:
         ]
 
     def read_file(self, relative_path: str) -> str:
-        """Read a text file, enforcing repository and size boundaries."""
         path = self._resolve_path(relative_path)
 
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("Path must refer to a regular file.")
+        if not path.exists():
+            raise FileNotFoundError(
+                f"File not found: {relative_path}"
+            )
+
+        if not path.is_file():
+            raise ValueError(
+                f"Path must refer to a regular file: {relative_path}"
+            )
 
         if path.stat().st_size > self.MAX_FILE_SIZE:
-            raise ValueError("File exceeds the 1 MB read limit.")
+            raise ValueError(
+                f"File exceeds maximum allowed size: {relative_path}"
+            )
 
-        try:
-            return path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("File is not valid UTF-8 text.") from exc
+        return path.read_text(encoding="utf-8")
 
     def search_code(
         self,
