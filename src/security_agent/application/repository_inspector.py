@@ -40,7 +40,7 @@ class RepositoryInspector:
 
         command = [
             str(wrapper),
-            "dependencyInsight",
+            ":app:dependencyInsight",
             "--dependency",
             finding.component,
             "--configuration",
@@ -48,7 +48,7 @@ class RepositoryInspector:
             "--console=plain",
         ]
 
-        print(f"Running command: {' '.join(command)} in {root} ---------------")
+        print(f"Running command: {' '.join(command)} in {root} \n---------------")
 
         try:
             result = subprocess.run(
