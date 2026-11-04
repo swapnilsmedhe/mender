@@ -1,71 +1,117 @@
 
 from dataclasses import replace
 
-from security_agent.application.analyzer import FindingAnalyzer
-from security_agent.application.planner import RemediationPlanner
-from security_agent.application.repository_inspector import RepositoryInspector
-from security_agent.domain.finding import SecurityFinding
 from security_agent.domain.remediation import RemediationPlan
 
 
 class SecurityRemediationOrchestrator:
-    def __init__(
-            self,
-            analyzer: FindingAnalyzer,
-            planner: RemediationPlanner,
-            inspector: RepositoryInspector,
-    ) -> None:
+    def __init__(self, analyzer, planner, inspector):
         self.analyzer = analyzer
         self.planner = planner
         self.inspector = inspector
 
-    def run(self, finding: SecurityFinding) -> RemediationPlan:
+    def run(self, finding):
         inspection = self.inspector.inspect(finding)
 
-        if not inspection.is_consistent:
-            matching_modules = [
-                match.project_path for match in inspection.matches
-            ]
-
-            details = (
-                f"Matching modules: {', '.join(matching_modules)}"
-                if matching_modules
-                else "No matching module was identified."
-            )
-
-            errors = (
-                "\nInspection errors:\n" + "\n".join(inspection.errors)
-                if inspection.errors
-                else ""
-            )
-
+        # Inspection errors always stop the workflow.
+        if inspection.errors:
             raise ValueError(
                 f"Repository evidence is not conclusive for finding "
                 f"{finding.id}.\n"
-                f"{details}\n"
-                f"{errors}\n"
+                f"Direct matches: {len(inspection.matches)}.\n"
+                f"Inspection errors: {list(inspection.errors)}.\n"
                 "No remediation plan was generated."
             )
 
-        if len(inspection.matches) != 1:
+        # No direct declaration means there is nothing safe to change.
+        if not inspection.matches:
             raise ValueError(
-                f"Expected exactly one matching Gradle module for "
-                f"finding {finding.id}, but found "
-                f"{len(inspection.matches)}.\n"
+                f"Repository evidence is not conclusive for finding "
+                f"{finding.id}.\n"
+                "No direct dependency declarations were found.\n"
                 "No remediation plan was generated."
             )
 
-        matched_module = inspection.matches[0]
+        # Multiple direct matches are actionable when there are no
+        # inspection errors. Other inconsistent results remain blocked.
+        if not inspection.is_consistent and len(inspection.matches) < 2:
+            raise ValueError(
+                f"Repository evidence is not conclusive for finding "
+                f"{finding.id}.\n"
+                f"Direct matches: {len(inspection.matches)}.\n"
+                "No remediation plan was generated."
+            )
 
-        # Use the actual build file discovered by Gradle.
-        updated_finding = replace(
-            finding,
-            file=matched_module.build_file,
+        plans = []
+
+        # Analyze and plan each direct dependency declaration.
+        for match in inspection.matches:
+            module_finding = replace(
+                finding,
+                file=match.build_file,
+            )
+
+            analysis = self.analyzer.analyze(module_finding)
+
+            plan = self.planner.create_plan(
+                finding=module_finding,
+                analysis=analysis,
+            )
+
+            plans.append(plan)
+
+        # All module plans must recommend the same remediation type.
+        remediation_types = {
+            plan.remediation_type
+            for plan in plans
+        }
+
+        if len(remediation_types) != 1:
+            raise ValueError(
+                "Modules produced conflicting remediation types. "
+                "No combined remediation plan was generated."
+            )
+
+        # Collect changes from every module, avoiding duplicates.
+        changes_by_key = {}
+
+        for plan in plans:
+            for change in plan.changes:
+                key = (change.file, change.dependency)
+                changes_by_key[key] = change
+
+        changes = list(changes_by_key.values())
+
+        # Combine validation steps without duplicates.
+        validation_steps = list(
+            dict.fromkeys(
+                step
+                for plan in plans
+                for step in plan.validation_steps
+            )
         )
 
-        analysis = self.analyzer.analyze(updated_finding)
+        # Use the lowest confidence across all module plans.
+        confidence_rank = {
+            "HIGH": 3,
+            "MEDIUM": 2,
+            "LOW": 1,
+        }
 
-        return self.planner.create_plan(
-            finding=updated_finding,
-            analysis=analysis,
+        confidence = min(
+            (plan.confidence for plan in plans),
+            key=lambda item: confidence_rank[item.value],
+        )
+
+        reasons = list(
+            dict.fromkeys(plan.reason for plan in plans)
+        )
+
+        return RemediationPlan(
+            finding_id=finding.id,
+            remediation_type=plans[0].remediation_type,
+            reason="; ".join(reasons),
+            confidence=confidence,
+            changes=changes,
+            validation_steps=validation_steps,
         )

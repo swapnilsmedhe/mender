@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 import pytest
@@ -56,8 +57,6 @@ def test_generates_preview_without_modifying_file(
     assert results[0].status == PreviewStatus.READY
     assert "2.15.2" in results[0].diff
     assert "2.17.3" in results[0].diff
-
-    # Preview must never modify the file.
     assert file.read_text(encoding="utf-8") == original
 
 
@@ -108,6 +107,89 @@ def test_detects_multiple_declarations(repository, engine, plan):
     assert results[0].status == PreviewStatus.AMBIGUOUS
 
 
+def test_supports_kotlin_dsl(repository, engine):
+    file = repository / "app" / "build.gradle.kts"
+    file.parent.mkdir(parents=True)
+
+    original = """dependencies {
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.15.2")
+}
+"""
+
+    file.write_text(original, encoding="utf-8")
+
+    kotlin_plan = RemediationPlan(
+        finding_id="BD-12345",
+        remediation_type=RemediationType.VERSION_UPGRADE,
+        reason="Upgrade vulnerable dependency",
+        confidence=Confidence.HIGH,
+        changes=[
+            FileChange(
+                file="app/build.gradle.kts",
+                dependency="jackson-databind",
+                current_version="2.15.2",
+                target_version="2.17.3",
+            )
+        ],
+    )
+
+    results = engine.create_preview(kotlin_plan)
+
+    assert results[0].status == PreviewStatus.READY
+    assert "2.17.3" in results[0].diff
+    assert file.read_text(encoding="utf-8") == original
+
+
+def test_supports_root_gradle_properties(repository, engine):
+    app = repository / "app"
+    app.mkdir()
+
+    build_file = app / "build.gradle.kts"
+    build_file.write_text(
+        """val jacksonDatabindVersion =
+    findProperty("jackson_databind_version") as String
+
+dependencies {
+    implementation("com.fasterxml.jackson.core:jackson-databind:$jacksonDatabindVersion")
+}
+""",
+        encoding="utf-8",
+    )
+
+    properties_file = repository / "gradle.properties"
+    original_properties = "jackson_databind_version=2.15.2\n"
+    properties_file.write_text(
+        original_properties,
+        encoding="utf-8",
+    )
+
+    property_plan = RemediationPlan(
+        finding_id="BD-12345",
+        remediation_type=RemediationType.VERSION_UPGRADE,
+        reason="Upgrade vulnerable dependency",
+        confidence=Confidence.HIGH,
+        changes=[
+            FileChange(
+                file="app/build.gradle.kts",
+                dependency="jackson-databind",
+                current_version="2.15.2",
+                target_version="2.17.3",
+            )
+        ],
+    )
+
+    results = engine.create_preview(property_plan)
+
+    assert results[0].status == PreviewStatus.READY
+    assert results[0].file == "gradle.properties"
+    assert "2.15.2" in results[0].diff
+    assert "2.17.3" in results[0].diff
+
+    assert properties_file.read_text(
+        encoding="utf-8"
+    ) == original_properties
+
+
 def test_rejects_unsupported_file(repository, engine, plan):
     unsupported_plan = RemediationPlan(
         finding_id=plan.finding_id,
@@ -116,7 +198,7 @@ def test_rejects_unsupported_file(repository, engine, plan):
         confidence=plan.confidence,
         changes=[
             FileChange(
-                file="build.gradle.kts",
+                file="pom.xml",
                 dependency="jackson-databind",
                 current_version="2.15.2",
                 target_version="2.17.3",

@@ -1,5 +1,6 @@
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -26,9 +27,22 @@ class RepositoryInspection:
     is_consistent: bool
     matches: tuple[ModuleMatch, ...] = ()
     errors: tuple[str, ...] = ()
+    transitive_matches: tuple[ModuleMatch, ...] = ()
 
 
 class RepositoryInspector:
+    SUPPORTED_CONFIGURATIONS = (
+        "implementation",
+        "api",
+        "runtimeOnly",
+        "compileOnly",
+        "testImplementation",
+        "testRuntimeOnly",
+        "testCompileOnly",
+        "annotationProcessor",
+        "kapt",
+    )
+
     def __init__(
             self,
             tools: RepositoryTools,
@@ -43,34 +57,65 @@ class RepositoryInspector:
             timeout_seconds=timeout_seconds,
         )
 
-    def inspect(self, finding: SecurityFinding) -> RepositoryInspection:
+    def inspect(
+            self,
+            finding: SecurityFinding,
+    ) -> RepositoryInspection:
         modules = self.discovery.discover()
 
-        matches: list[ModuleMatch] = []
-        errors: list[str] = []
-        outputs: list[str] = []
+        direct_matches = []
+        transitive_matches = []
+        errors = []
+        outputs = []
 
-        for module in modules:
-            if module.build_file is None:
-                errors.append(
-                    f"{module.project_path}: no build file was discovered."
-                )
-                continue
+        modules_with_build_files = [
+            module for module in modules
+            if module.build_file is not None
+        ]
 
+        if not modules_with_build_files:
+            errors.append(
+                "No Gradle projects with existing build files"
+            )
+
+            return RepositoryInspection(
+                finding_id=finding.id,
+                configuration=self.configuration,
+                command_output="",
+                is_consistent=False,
+                errors=tuple(errors),
+            )
+
+        for module in modules_with_build_files:
             try:
                 output = self._inspect_module(module, finding)
+
                 outputs.append(
                     f"Module {module.project_path}:\n{output}"
                 )
 
-                if self._contains_finding(output, finding):
-                    matches.append(
-                        ModuleMatch(
-                            project_path=module.project_path,
-                            build_file=module.build_file,
-                            command_output=output,
-                        )
+                if not self._contains_finding(output, finding):
+                    continue
+
+                match = ModuleMatch(
+                    project_path=module.project_path,
+                    build_file=module.build_file,
+                    command_output=output,
+                )
+
+                try:
+                    content = self.tools.read_file(module.build_file)
+                except (FileNotFoundError, ValueError) as exc:
+                    errors.append(
+                        f"{module.project_path}: could not read "
+                        f"{module.build_file}: {exc}"
                     )
+                    continue
+
+                if self._contains_direct_dependency(content, finding):
+                    direct_matches.append(match)
+                else:
+                    transitive_matches.append(match)
 
             except RuntimeError as exc:
                 errors.append(f"{module.project_path}: {exc}")
@@ -79,9 +124,12 @@ class RepositoryInspector:
             finding_id=finding.id,
             configuration=self.configuration,
             command_output="\n\n".join(outputs),
-            is_consistent=(len(matches) == 1 and not errors),
-            matches=tuple(matches),
+            is_consistent=(
+                    len(direct_matches) == 1 and not errors
+            ),
+            matches=tuple(direct_matches),
             errors=tuple(errors),
+            transitive_matches=tuple(transitive_matches),
         )
 
     def _inspect_module(
@@ -90,7 +138,10 @@ class RepositoryInspector:
             finding: SecurityFinding,
     ) -> str:
         root = self.tools.root
-        wrapper_name = "gradlew.bat" if os.name == "nt" else "gradlew"
+
+        wrapper_name = (
+            "gradlew.bat" if os.name == "nt" else "gradlew"
+        )
         wrapper = root / wrapper_name
 
         task = (
@@ -124,12 +175,14 @@ class RepositoryInspector:
                 "Gradle dependency inspection timed out."
             ) from exc
 
-        output = f"{result.stdout}\n{result.stderr}".strip()
+        output = (
+            f"{result.stdout}\n{result.stderr}"
+        ).strip()
 
         if result.returncode != 0:
             raise RuntimeError(
                 "Gradle dependency inspection failed.\n"
-                f"Command: {' '.join(command)}\n{output}"
+                f"{output}"
             )
 
         return output
@@ -143,3 +196,136 @@ class RepositoryInspector:
                 finding.component.casefold() in output.casefold()
                 and finding.current_version in output
         )
+
+    @classmethod
+    def _contains_direct_dependency(
+            cls,
+            content: str,
+            finding: SecurityFinding,
+    ) -> bool:
+        configurations = "|".join(
+            re.escape(item)
+            for item in cls.SUPPORTED_CONFIGURATIONS
+        )
+
+        configuration_pattern = re.compile(
+            rf"^\s*(?:{configurations})\b(.*)$"
+        )
+
+        lines = content.splitlines()
+        index = 0
+
+        while index < len(lines):
+            match = configuration_pattern.match(lines[index])
+
+            if not match:
+                index += 1
+                continue
+
+            declaration_lines = [match.group(1)]
+            index += 1
+
+            while index < len(lines):
+                line = lines[index]
+                stripped = line.strip()
+
+                if not stripped or stripped.startswith("//"):
+                    index += 1
+                    continue
+
+                if stripped.startswith("}"):
+                    break
+
+                if configuration_pattern.match(line):
+                    break
+
+                declaration_lines.append(line)
+                index += 1
+
+            declaration = " ".join(declaration_lines)
+            declaration = re.sub(r"//.*", "", declaration)
+
+            if cls._matches_string_notation(declaration, finding):
+                return True
+
+            if cls._matches_map_notation(declaration, finding):
+                return True
+
+            index += 1
+
+        return False
+
+    @staticmethod
+    def _version_matches(
+            version: str,
+            finding: SecurityFinding,
+    ) -> bool:
+        if version == finding.current_version:
+            return True
+
+        # A variable reference is accepted here because Gradle's
+        # dependencyInsight output has already confirmed the resolved
+        # component and version for this module.
+        return bool(
+            re.fullmatch(
+                r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?",
+                version,
+            )
+        )
+
+    @classmethod
+    def _matches_string_notation(
+            cls,
+            declaration: str,
+            finding: SecurityFinding,
+    ) -> bool:
+        coordinates = re.findall(
+            r"""['"]([^'"]+)['"]""",
+            declaration,
+        )
+
+        for coordinate in coordinates:
+            parts = coordinate.split(":")
+
+            if len(parts) != 3:
+                continue
+
+            _, artifact, version = parts
+
+            if artifact.casefold() != finding.component.casefold():
+                continue
+
+            if cls._version_matches(version, finding):
+                return True
+
+        return False
+
+    @classmethod
+    def _matches_map_notation(
+            cls,
+            declaration: str,
+            finding: SecurityFinding,
+    ) -> bool:
+        group_match = re.search(
+            r"""group\s*:\s*['"]([^'"]+)['"]""",
+            declaration,
+        )
+        name_match = re.search(
+            r"""name\s*:\s*['"]([^'"]+)['"]""",
+            declaration,
+        )
+        version_match = re.search(
+            r"""version\s*:\s*['"]([^'"]+)['"]""",
+            declaration,
+        )
+
+        if not group_match or not name_match or not version_match:
+            return False
+
+        artifact = name_match.group(1)
+        version = version_match.group(1)
+
+        if artifact.casefold() != finding.component.casefold():
+            return False
+
+        return cls._version_matches(version, finding)

@@ -126,7 +126,8 @@ def test_planner_error_is_propagated(orchestrator):
     orchestrator.planner.create_plan.assert_called_once()
 
 
-def test_multiple_matching_modules_stop_workflow(orchestrator):
+
+def test_multiple_matching_modules_are_processed(orchestrator):
     matches = (
         ModuleMatch(
             project_path=":app",
@@ -145,14 +146,22 @@ def test_multiple_matching_modules_stop_workflow(orchestrator):
         matches=matches,
     )
 
-    with pytest.raises(
-            ValueError,
-            match="Repository evidence is not conclusive",
-    ):
-        orchestrator.run(make_finding())
+    result = orchestrator.run(make_finding())
 
-    orchestrator.analyzer.analyze.assert_not_called()
-    orchestrator.planner.create_plan.assert_not_called()
+    assert result.finding_id == "BD-12345"
+    assert orchestrator.analyzer.analyze.call_count == 2
+    assert orchestrator.planner.create_plan.call_count == 2
+
+    analyzed_files = [
+        call.args[0].file
+        for call in orchestrator.analyzer.analyze.call_args_list
+    ]
+
+    assert analyzed_files == [
+        "app/build.gradle",
+        "backend/build.gradle",
+    ]
+
 
 
 def test_inspection_errors_stop_workflow(orchestrator):
