@@ -11,18 +11,61 @@ from security_agent.domain.remediation import (
 
 class RemediationPlanner:
     def create_plan(
-        self,
-        finding: SecurityFinding,
-        analysis: FindingAnalysis,
+            self,
+            finding: SecurityFinding,
+            analysis: FindingAnalysis,
+            *,
+            is_transitive: bool = False,
+            dependency_paths: tuple[tuple[str, ...], ...] = (),
     ) -> RemediationPlan:
         if finding.id != analysis.finding_id:
             raise ValueError(
                 "Finding and analysis IDs must match."
             )
 
+        # A scanner-reported fixed version belongs to the vulnerable
+        # component. It does not establish a safe version for the
+        # dependency that introduces that component.
+        if is_transitive:
+            observed_paths = [
+                " -> ".join(path)
+                for path in dependency_paths
+                if path
+            ]
+
+            if observed_paths:
+                path_details = (
+                        " Observed dependency path(s): "
+                        + " | ".join(observed_paths)
+                )
+            else:
+                path_details = (
+                    " Gradle did not provide a dependency path "
+                    "for this finding."
+                )
+
+            reason = (
+                f"{analysis.root_cause} "
+                "Automatic remediation was not generated because "
+                "the vulnerable dependency is transitive. "
+                "The scanner's fixed version, if reported, applies "
+                "to the vulnerable component; it does not establish "
+                "a safe target version for the introducing dependency."
+                f"{path_details}"
+            )
+
+            return RemediationPlan(
+                finding_id=finding.id,
+                remediation_type=(
+                    RemediationType.NO_AUTOMATIC_REMEDIATION
+                ),
+                reason=reason,
+                confidence=analysis.confidence,
+            )
+
         if (
-            analysis.recommended_action
-            == RemediationType.NO_AUTOMATIC_REMEDIATION
+                analysis.recommended_action
+                == RemediationType.NO_AUTOMATIC_REMEDIATION
         ):
             return RemediationPlan(
                 finding_id=finding.id,

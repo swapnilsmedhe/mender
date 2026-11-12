@@ -1,6 +1,6 @@
-
 from dataclasses import replace
 
+from security_agent.domain.analysis import RemediationType
 from security_agent.domain.remediation import RemediationPlan
 
 
@@ -19,22 +19,29 @@ class SecurityRemediationOrchestrator:
                 f"Repository evidence is not conclusive for finding "
                 f"{finding.id}.\n"
                 f"Direct matches: {len(inspection.matches)}.\n"
+                f"Transitive matches: "
+                f"{len(inspection.transitive_matches)}.\n"
                 f"Inspection errors: {list(inspection.errors)}.\n"
                 "No remediation plan was generated."
             )
 
-        # No direct declaration means there is nothing safe to change.
-        if not inspection.matches:
+        # There must be at least one direct or transitive match.
+        if not inspection.matches and not inspection.transitive_matches:
             raise ValueError(
                 f"Repository evidence is not conclusive for finding "
                 f"{finding.id}.\n"
-                "No direct dependency declarations were found.\n"
+                "No direct or transitive dependency matches were found.\n"
                 "No remediation plan was generated."
             )
 
-        # Multiple direct matches are actionable when there are no
-        # inspection errors. Other inconsistent results remain blocked.
-        if not inspection.is_consistent and len(inspection.matches) < 2:
+        # Preserve the existing consistency check for direct matches.
+        # A transitive-only inspection can legitimately have no direct
+        # matches and is_consistent=False.
+        if (
+                inspection.matches
+                and not inspection.is_consistent
+                and len(inspection.matches) < 2
+        ):
             raise ValueError(
                 f"Repository evidence is not conclusive for finding "
                 f"{finding.id}.\n"
@@ -44,8 +51,15 @@ class SecurityRemediationOrchestrator:
 
         plans = []
 
-        # Analyze and plan each direct dependency declaration.
-        for match in inspection.matches:
+        module_matches = [
+                             (match, False)
+                             for match in inspection.matches
+                         ] + [
+                             (match, True)
+                             for match in inspection.transitive_matches
+                         ]
+
+        for match, is_transitive in module_matches:
             module_finding = replace(
                 finding,
                 file=match.build_file,
@@ -53,14 +67,56 @@ class SecurityRemediationOrchestrator:
 
             analysis = self.analyzer.analyze(module_finding)
 
-            plan = self.planner.create_plan(
-                finding=module_finding,
-                analysis=analysis,
-            )
+            if is_transitive:
+                plan = self.planner.create_plan(
+                    finding=module_finding,
+                    analysis=analysis,
+                    is_transitive=True,
+                    dependency_paths=match.dependency_paths,
+                )
+            else:
+                # Preserve the existing planner call for direct matches.
+                plan = self.planner.create_plan(
+                    finding=module_finding,
+                    analysis=analysis,
+                )
 
             plans.append(plan)
 
-        # All module plans must recommend the same remediation type.
+        # If any affected module cannot be remediated automatically,
+        # do not return a partial automatic upgrade for other modules.
+        if any(
+                plan.remediation_type
+                == RemediationType.NO_AUTOMATIC_REMEDIATION
+                for plan in plans
+        ):
+            confidence_rank = {
+                "HIGH": 3,
+                "MEDIUM": 2,
+                "LOW": 1,
+            }
+
+            confidence = min(
+                (plan.confidence for plan in plans),
+                key=lambda item: confidence_rank[item.value],
+            )
+
+            reasons = list(
+                dict.fromkeys(plan.reason for plan in plans)
+            )
+
+            return RemediationPlan(
+                finding_id=finding.id,
+                remediation_type=(
+                    RemediationType.NO_AUTOMATIC_REMEDIATION
+                ),
+                reason="; ".join(reasons),
+                confidence=confidence,
+                changes=[],
+                validation_steps=[],
+            )
+
+        # All remaining module plans must recommend the same action.
         remediation_types = {
             plan.remediation_type
             for plan in plans
