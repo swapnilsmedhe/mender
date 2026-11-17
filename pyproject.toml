@@ -19,3 +19,11 @@ build-backend = "uv_build"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.uv.build-backend]
+module-name = ["mender", "security_agent"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]

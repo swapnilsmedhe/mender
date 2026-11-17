@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from mender!")
+from security_agent.main import main
+
+__all__ = ["main"]
