@@ -37,13 +37,14 @@ def create_match(
         project_path=":app",
         build_file="app/build.gradle",
         command_output="dependency output",
+        dependency_paths=(),
 ):
     return ModuleMatch(
         project_path=project_path,
         build_file=build_file,
         command_output=command_output,
+        dependency_paths=dependency_paths,
     )
-
 
 def create_inspection(
         finding_id="finding-1",
@@ -289,3 +290,24 @@ class TestAIRecommendationContextBuilder:
 
         facts = {fact.key: fact.value for fact in context.facts}
         assert facts["locations_omitted"] == "1"
+
+            def test_preserves_transitive_dependency_path(self, builder, finding):
+        expected_path = (
+            "org.springframework.boot:spring-boot-starter-web:3.2.1",
+            "org.springframework.boot:spring-boot-starter-json:3.2.1",
+            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+        )
+
+        inspection = create_inspection(
+            transitive_matches=[
+                create_match(
+                    project_path=":service",
+                    build_file="service/build.gradle",
+                    dependency_paths=(expected_path,),
+                )
+            ]
+        )
+
+        context = builder.build(finding, inspection)
+
+        assert context.locations[0].dependency_path == expected_path

@@ -118,6 +118,7 @@ class AIRecommendationContextBuilder:
             facts=facts,
         )
 
+    
     @staticmethod
     def _to_location(
             match,
@@ -127,7 +128,9 @@ class AIRecommendationContextBuilder:
             module_path=str(match.project_path),
             manifest_file=str(match.build_file),
             relationship=relationship,
+            dependency_path=match.dependency_path,
         )
+
 
     @staticmethod
     def _deduplicate(
