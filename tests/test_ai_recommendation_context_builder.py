@@ -291,7 +291,7 @@ class TestAIRecommendationContextBuilder:
         facts = {fact.key: fact.value for fact in context.facts}
         assert facts["locations_omitted"] == "1"
 
-            def test_preserves_transitive_dependency_path(self, builder, finding):
+    def test_preserves_transitive_dependency_path(self, builder, finding):
         expected_path = (
             "org.springframework.boot:spring-boot-starter-web:3.2.1",
             "org.springframework.boot:spring-boot-starter-json:3.2.1",

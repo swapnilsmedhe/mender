@@ -178,3 +178,37 @@ def test_inspection_errors_stop_workflow(orchestrator):
 
     orchestrator.analyzer.analyze.assert_not_called()
     orchestrator.planner.create_plan.assert_not_called()
+
+def test_ai_recommendation_service_is_invoked(orchestrator):
+    ai_service = Mock()
+    ai_service.recommend.return_value = Mock(
+        result=None,
+        error="No AI recommendation provider is configured.",
+    )
+
+    orchestrator.ai_recommendation_service = ai_service
+
+    orchestrator.run(make_finding())
+
+    ai_service.recommend.assert_called_once()
+
+    kwargs = ai_service.recommend.call_args.kwargs
+    assert kwargs["finding"].id == "BD-12345"
+    assert kwargs["inspection"] == orchestrator.inspector.inspect.return_value
+
+    assert len(orchestrator.ai_recommendation_outcomes) == 1
+
+def test_ai_failure_does_not_stop_deterministic_planning(orchestrator):
+    ai_service = Mock()
+    ai_service.recommend.return_value = Mock(
+        result=None,
+        error="AI provider failed (RuntimeError).",
+    )
+
+    orchestrator.ai_recommendation_service = ai_service
+
+    result = orchestrator.run(make_finding())
+
+    assert result.remediation_type == RemediationType.VERSION_UPGRADE
+    orchestrator.planner.create_plan.assert_called_once()
+    assert orchestrator.ai_recommendation_outcomes[0].error is not None

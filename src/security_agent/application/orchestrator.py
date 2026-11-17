@@ -2,15 +2,26 @@ from dataclasses import replace
 
 from security_agent.domain.analysis import RemediationType
 from security_agent.domain.remediation import RemediationPlan
-
+from security_agent.application.ai_recommendation_service import AIRecommendationService
 
 class SecurityRemediationOrchestrator:
-    def __init__(self, analyzer, planner, inspector):
+    def __init__(
+            self,
+            analyzer,
+            planner,
+            inspector,
+            ai_recommendation_service: AIRecommendationService | None = None,
+            force_ai: bool = False,
+    ):
         self.analyzer = analyzer
         self.planner = planner
         self.inspector = inspector
+        self.ai_recommendation_service = ai_recommendation_service
+        self.force_ai = force_ai
+        self.ai_recommendation_outcomes = []
 
     def run(self, finding):
+        self.ai_recommendation_outcomes = []
         inspection = self.inspector.inspect(finding)
 
         # Inspection errors always stop the workflow.
@@ -66,6 +77,15 @@ class SecurityRemediationOrchestrator:
             )
 
             analysis = self.analyzer.analyze(module_finding)
+
+            if self.ai_recommendation_service is not None:
+                outcome = self.ai_recommendation_service.recommend(
+                    finding=module_finding,
+                    analysis=analysis,
+                    force=self.force_ai,
+                    inspection=inspection,
+                )
+                self.ai_recommendation_outcomes.append(outcome)
 
             if is_transitive:
                 plan = self.planner.create_plan(

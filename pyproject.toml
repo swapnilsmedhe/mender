@@ -1,13 +1,16 @@
+
 [project]
 name = "mender"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI-assisted security vulnerability remediation agent"
 readme = "README.md"
 authors = [
     { name = "Swapnil Medhe", email = "53039172+swapnilsmedhe@users.noreply.github.com" }
 ]
-requires-python = ">=3.10"
-dependencies = []
+requires-python = ">=3.11"
+dependencies = [
+    "github-copilot-sdk>=1.0.0",
+]
 
 [project.scripts]
 mender = "mender:main"
