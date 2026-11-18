@@ -21,6 +21,14 @@ class AIRecommendationContextBuilder:
                 "Finding and repository inspection IDs do not match."
             )
 
+        total_paths = sum(
+            len(match.dependency_paths)
+            for match in (
+                *inspection.matches,
+                *inspection.transitive_matches,
+            )
+        )
+
         facts = (
             ContextFact(
                 key="inspection_consistent",
@@ -33,6 +41,10 @@ class AIRecommendationContextBuilder:
             ContextFact(
                 key="transitive_match_count",
                 value=str(len(inspection.transitive_matches)),
+            ),
+            ContextFact(
+                key="dependency_path_count",
+                value=str(total_paths),
             ),
             ContextFact(
                 key="inspection_error_count",
@@ -53,22 +65,28 @@ class AIRecommendationContextBuilder:
 
         for matches, relationship in match_groups:
             for match in matches:
-                try:
-                    location = self._to_location(
-                        match,
-                        relationship,
-                    )
-                    candidates.append(location)
-                except ValueError:
-                    # Individual location validation failed.
-                    omitted_count += 1
+                paths = match.dependency_paths or ((),)
+
+                for dependency_path in paths:
+                    try:
+                        location = self._to_location(
+                            match=match,
+                            relationship=relationship,
+                            dependency_path=dependency_path,
+                        )
+                        candidates.append(location)
+                    except ValueError:
+                        omitted_count += 1
 
         candidates = self._deduplicate(candidates)
 
         included = []
 
         for location in candidates:
-            if len(included) >= AIRecommendationContext.MAX_LOCATIONS:
+            if (
+                    len(included)
+                    >= AIRecommendationContext.MAX_LOCATIONS
+            ):
                 omitted_count += 1
                 continue
 
@@ -80,7 +98,6 @@ class AIRecommendationContextBuilder:
                     facts=facts,
                 )
             except ValueError:
-                # The location would exceed the overall context budget.
                 omitted_count += 1
                 continue
 
@@ -107,7 +124,6 @@ class AIRecommendationContextBuilder:
                     if not included:
                         raise
 
-                    # Make room for the omission summary.
                     included.pop()
                     omitted_count += 1
 
@@ -118,19 +134,18 @@ class AIRecommendationContextBuilder:
             facts=facts,
         )
 
-    
     @staticmethod
     def _to_location(
             match,
             relationship: DependencyRelationship,
+            dependency_path: tuple[str, ...],
     ) -> DependencyLocation:
         return DependencyLocation(
             module_path=str(match.project_path),
             manifest_file=str(match.build_file),
             relationship=relationship,
-            dependency_path=match.dependency_path,
+            dependency_path=dependency_path,
         )
-
 
     @staticmethod
     def _deduplicate(
@@ -144,6 +159,7 @@ class AIRecommendationContextBuilder:
                 location.module_path,
                 location.manifest_file,
                 location.relationship,
+                location.dependency_path,
             )
 
             if key not in seen:

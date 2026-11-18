@@ -212,3 +212,57 @@ def test_ai_failure_does_not_stop_deterministic_planning(orchestrator):
     assert result.remediation_type == RemediationType.VERSION_UPGRADE
     orchestrator.planner.create_plan.assert_called_once()
     assert orchestrator.ai_recommendation_outcomes[0].error is not None
+
+
+def test_ai_recommendation_is_invoked_once_for_multiple_modules(
+        orchestrator,
+):
+    matches = (
+        ModuleMatch(
+            project_path=":app",
+            build_file="app/build.gradle",
+            command_output="jackson-databind:2.15.2",
+        ),
+        ModuleMatch(
+            project_path=":backend",
+            build_file="backend/build.gradle",
+            command_output="jackson-databind:2.15.2",
+        ),
+        ModuleMatch(
+            project_path=":worker",
+            build_file="worker/build.gradle",
+            command_output="jackson-databind:2.15.2",
+        ),
+    )
+
+    orchestrator.inspector.inspect.return_value = make_inspection(
+        is_consistent=False,
+        matches=matches,
+    )
+
+    ai_service = Mock()
+    ai_service.recommend.return_value = Mock(
+        result=None,
+        error=None,
+    )
+
+    orchestrator.ai_recommendation_service = ai_service
+
+    orchestrator.run(make_finding())
+
+    # Deterministic analysis and planning remain module-specific.
+    assert orchestrator.analyzer.analyze.call_count == 3
+    assert orchestrator.planner.create_plan.call_count == 3
+
+    # AI analysis happens once for the complete repository finding.
+    ai_service.recommend.assert_called_once()
+
+    kwargs = ai_service.recommend.call_args.kwargs
+
+    assert kwargs["finding"].id == "BD-12345"
+    assert kwargs["inspection"] == (
+        orchestrator.inspector.inspect.return_value
+    )
+
+    assert len(orchestrator.ai_recommendation_outcomes) == 1
+

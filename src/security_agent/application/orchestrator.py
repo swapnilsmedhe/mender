@@ -1,8 +1,11 @@
 from dataclasses import replace
 
+from security_agent.application.ai_recommendation_service import (
+    AIRecommendationService,
+)
 from security_agent.domain.analysis import RemediationType
 from security_agent.domain.remediation import RemediationPlan
-from security_agent.application.ai_recommendation_service import AIRecommendationService
+
 
 class SecurityRemediationOrchestrator:
     def __init__(
@@ -22,9 +25,9 @@ class SecurityRemediationOrchestrator:
 
     def run(self, finding):
         self.ai_recommendation_outcomes = []
+
         inspection = self.inspector.inspect(finding)
 
-        # Inspection errors always stop the workflow.
         if inspection.errors:
             raise ValueError(
                 f"Repository evidence is not conclusive for finding "
@@ -36,7 +39,6 @@ class SecurityRemediationOrchestrator:
                 "No remediation plan was generated."
             )
 
-        # There must be at least one direct or transitive match.
         if not inspection.matches and not inspection.transitive_matches:
             raise ValueError(
                 f"Repository evidence is not conclusive for finding "
@@ -45,9 +47,6 @@ class SecurityRemediationOrchestrator:
                 "No remediation plan was generated."
             )
 
-        # Preserve the existing consistency check for direct matches.
-        # A transitive-only inspection can legitimately have no direct
-        # matches and is_consistent=False.
         if (
                 inspection.matches
                 and not inspection.is_consistent
@@ -60,16 +59,19 @@ class SecurityRemediationOrchestrator:
                 "No remediation plan was generated."
             )
 
-        plans = []
-
         module_matches = [
-                             (match, False)
-                             for match in inspection.matches
-                         ] + [
-                             (match, True)
-                             for match in inspection.transitive_matches
-                         ]
+            (match, False)
+            for match in inspection.matches
+        ] + [
+            (match, True)
+            for match in inspection.transitive_matches
+        ]
 
+        plans = []
+        ai_analysis = None
+
+        # Deterministic analysis and planning remain module-specific.
+        # AI analysis is deliberately not performed inside this loop.
         for match, is_transitive in module_matches:
             module_finding = replace(
                 finding,
@@ -78,14 +80,11 @@ class SecurityRemediationOrchestrator:
 
             analysis = self.analyzer.analyze(module_finding)
 
-            if self.ai_recommendation_service is not None:
-                outcome = self.ai_recommendation_service.recommend(
-                    finding=module_finding,
-                    analysis=analysis,
-                    force=self.force_ai,
-                    inspection=inspection,
-                )
-                self.ai_recommendation_outcomes.append(outcome)
+            # The AI policy needs a finding analysis to decide whether
+            # deeper reasoning is necessary. The first module's
+            # deterministic analysis is sufficient for this decision.
+            if ai_analysis is None:
+                ai_analysis = analysis
 
             if is_transitive:
                 plan = self.planner.create_plan(
@@ -95,7 +94,6 @@ class SecurityRemediationOrchestrator:
                     dependency_paths=match.dependency_paths,
                 )
             else:
-                # Preserve the existing planner call for direct matches.
                 plan = self.planner.create_plan(
                     finding=module_finding,
                     analysis=analysis,
@@ -103,8 +101,22 @@ class SecurityRemediationOrchestrator:
 
             plans.append(plan)
 
-        # If any affected module cannot be remediated automatically,
-        # do not return a partial automatic upgrade for other modules.
+        # One AI invocation for the complete finding and repository
+        # inspection, regardless of the number of affected modules.
+        if (
+                self.ai_recommendation_service is not None
+                and ai_analysis is not None
+        ):
+            outcome = self.ai_recommendation_service.recommend(
+                finding=finding,
+                analysis=ai_analysis,
+                force=self.force_ai,
+                inspection=inspection,
+            )
+
+            self.ai_recommendation_outcomes.append(outcome)
+
+        # Do not produce a partial automatic remediation plan.
         if any(
                 plan.remediation_type
                 == RemediationType.NO_AUTOMATIC_REMEDIATION
@@ -136,7 +148,6 @@ class SecurityRemediationOrchestrator:
                 validation_steps=[],
             )
 
-        # All remaining module plans must recommend the same action.
         remediation_types = {
             plan.remediation_type
             for plan in plans
@@ -148,7 +159,6 @@ class SecurityRemediationOrchestrator:
                 "No combined remediation plan was generated."
             )
 
-        # Collect changes from every module, avoiding duplicates.
         changes_by_key = {}
 
         for plan in plans:
@@ -158,7 +168,6 @@ class SecurityRemediationOrchestrator:
 
         changes = list(changes_by_key.values())
 
-        # Combine validation steps without duplicates.
         validation_steps = list(
             dict.fromkeys(
                 step
@@ -167,7 +176,6 @@ class SecurityRemediationOrchestrator:
             )
         )
 
-        # Use the lowest confidence across all module plans.
         confidence_rank = {
             "HIGH": 3,
             "MEDIUM": 2,

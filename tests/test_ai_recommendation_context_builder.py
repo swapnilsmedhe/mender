@@ -311,3 +311,52 @@ class TestAIRecommendationContextBuilder:
         context = builder.build(finding, inspection)
 
         assert context.locations[0].dependency_path == expected_path
+
+
+
+    def test_preserves_all_dependency_paths_for_same_module(
+            self,
+            builder,
+            finding,
+    ):
+        first_path = (
+            "org.example:starter-web:3.2.1",
+            "org.example:starter-json:3.2.1",
+            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+        )
+
+        second_path = (
+            "org.example:starter-security:3.2.1",
+            "org.example:security-core:3.2.1",
+            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+        )
+
+        inspection = create_inspection(
+            transitive_matches=[
+                create_match(
+                    project_path=":service",
+                    build_file="service/build.gradle",
+                    dependency_paths=(
+                        first_path,
+                        second_path,
+                    ),
+                )
+            ]
+        )
+
+        context = builder.build(finding, inspection)
+
+        assert len(context.locations) == 2
+
+        assert {
+            location.dependency_path
+            for location in context.locations
+        } == {
+            first_path,
+            second_path,
+        }
+
+        facts = {fact.key: fact.value for fact in context.facts}
+
+        assert facts["transitive_match_count"] == "1"
+        assert facts["dependency_path_count"] == "2"
