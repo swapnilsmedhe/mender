@@ -73,7 +73,7 @@ class CopilotRecommendationProvider:
             ) from exc
 
         try:
-            async with CopilotClient(mode="empty") as client:
+            async with CopilotClient() as client:
                 async with await client.create_session(
                     model=self.model,
                     infinite_sessions={"enabled": False},
