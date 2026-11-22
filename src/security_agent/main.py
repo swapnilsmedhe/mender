@@ -5,15 +5,27 @@ from security_agent.application.ai_analysis_policy import AIAnalysisPolicy
 from security_agent.application.ai_recommendation_service import AIRecommendationService
 from security_agent.application.analyzer import FindingAnalyzer
 from security_agent.application.change_preview import ChangePreviewEngine
-from security_agent.application.constraint_aware_context_builder import ConstraintAwareAIRecommendationContextBuilder
-from security_agent.application.constraint_aware_repository_inspector import ConstraintAwareRepositoryInspector
-from security_agent.application.effective_property_inspector import EffectiveGradlePropertyInspector
+from security_agent.application.constraint_aware_context_builder import (
+    ConstraintAwareAIRecommendationContextBuilder,
+)
+from security_agent.application.constraint_aware_repository_inspector import (
+    ConstraintAwareRepositoryInspector,
+)
+from security_agent.application.effective_property_inspector import (
+    EffectiveGradlePropertyInspector,
+)
+from security_agent.application.gradle_bom_candidate_inspector import (
+    GradleBomCandidateCollector,
+    GradleBomCandidateInspector,
+)
 from security_agent.application.gradle_property_collector import GradlePropertyCollector
 from security_agent.application.orchestrator import SecurityRemediationOrchestrator
 from security_agent.application.planner import RemediationPlanner
 from security_agent.application.repository_inspector import RepositoryInspector
 from security_agent.domain.finding import Scanner, SecurityFinding, Severity
-from security_agent.infrastructure.ai.constraint_aware_copilot_provider import ConstraintAwareCopilotRecommendationProvider
+from security_agent.infrastructure.ai.constraint_aware_copilot_provider import (
+    ConstraintAwareCopilotRecommendationProvider,
+)
 from security_agent.tools.repository import RepositoryTools
 
 
@@ -139,33 +151,53 @@ def main() -> int:
     if args.ai_timeout <= 0:
         print("AI timeout must be greater than zero.")
         return 1
+
     try:
         tools = RepositoryTools(repository_root)
         finding = SecurityFinding(
-            id=args.finding_id, scanner=Scanner.BLACK_DUCK, severity=Severity[args.severity],
-            cve=args.cve, component=args.component, current_version=args.version,
-            fixed_versions=args.fixed_version, repository=repository_root.name, file=args.file,
+            id=args.finding_id,
+            scanner=Scanner.BLACK_DUCK,
+            severity=Severity[args.severity],
+            cve=args.cve,
+            component=args.component,
+            current_version=args.version,
+            fixed_versions=args.fixed_version,
+            repository=repository_root.name,
+            file=args.file,
         )
         base_inspector = RepositoryInspector(tools, configuration=args.configuration)
         constraint_inspector = ConstraintAwareRepositoryInspector(base_inspector)
-        inspector = EffectiveGradlePropertyInspector(
+        effective_inspector = EffectiveGradlePropertyInspector(
             constraint_inspector, GradlePropertyCollector(tools)
         )
+
+        inspector = effective_inspector
+        if args.ai:
+            inspector = GradleBomCandidateInspector(
+                effective_inspector, GradleBomCandidateCollector(tools)
+            )
+
         ai_service = None
         if args.ai:
             provider = ConstraintAwareCopilotRecommendationProvider(
                 model=args.ai_model, timeout_seconds=args.ai_timeout
             )
             ai_service = AIRecommendationService(
-                policy=AIAnalysisPolicy(), provider=provider,
+                policy=AIAnalysisPolicy(),
+                provider=provider,
                 context_builder=ConstraintAwareAIRecommendationContextBuilder(),
             )
+
         orchestrator = SecurityRemediationOrchestrator(
-            analyzer=FindingAnalyzer(), planner=RemediationPlanner(), inspector=inspector,
-            ai_recommendation_service=ai_service, force_ai=args.ai,
+            analyzer=FindingAnalyzer(),
+            planner=RemediationPlanner(),
+            inspector=inspector,
+            ai_recommendation_service=ai_service,
+            force_ai=args.ai,
         )
         plan = orchestrator.run(finding)
         previews = ChangePreviewEngine(tools).create_preview(plan)
+
     except (ValueError, FileNotFoundError, OSError, RuntimeError) as exc:
         print(f"\nInspection failed: {exc}")
         print("No remediation changes were applied.")

@@ -1,8 +1,6 @@
 import json
 
-from security_agent.domain.ai_recommendation_context import (
-    AIRecommendationContext,
-)
+from security_agent.domain.ai_recommendation_context import AIRecommendationContext
 from security_agent.domain.finding import SecurityFinding
 from security_agent.infrastructure.ai.copilot_provider import (
     CopilotRecommendationProvider,
@@ -10,134 +8,111 @@ from security_agent.infrastructure.ai.copilot_provider import (
 
 
 class ConstraintAwareCopilotRecommendationProvider(CopilotRecommendationProvider):
-    """
-    Add Gradle constraint provenance and source declaration evidence
-    to the Copilot remediation reasoning prompt.
-    """
-
     @staticmethod
-    def _build_prompt(
-        finding: SecurityFinding,
-        context: AIRecommendationContext,
-    ) -> str:
-        prompt = CopilotRecommendationProvider._build_prompt(
-            finding,
-            context,
-        )
-
+    def _build_prompt(finding: SecurityFinding, context: AIRecommendationContext) -> str:
+        prompt = CopilotRecommendationProvider._build_prompt(finding, context)
         constraints = [
             {
-                "affected_module": constraint.module_path,
-                "affected_module_manifest": constraint.manifest_file,
-                "constraint_source_component": constraint.source_component,
-                "constraint_source_relationship": (
-                    constraint.source_relationship.value
-                ),
-                "constraint_provenance_path": list(constraint.provenance_path),
-                "requested_component": constraint.requested,
-                "selected_component": constraint.selected,
-                "selection_reason": constraint.selection_reason,
+                "affected_module": item.module_path,
+                "affected_module_manifest": item.manifest_file,
+                "constraint_source_component": item.source_component,
+                "constraint_source_relationship": item.source_relationship.value,
+                "constraint_provenance_path": list(item.provenance_path),
+                "requested_component": item.requested,
+                "selected_component": item.selected,
+                "selection_reason": item.selection_reason,
             }
-            for constraint in context.constraints
+            for item in context.constraints
         ]
 
         source_declarations = []
-
+        bom_candidates = []
         for fact in context.facts:
-            if not fact.key.startswith("source_declaration_"):
-                continue
-
             try:
-                source_declarations.append(json.loads(fact.value))
+                if fact.key.startswith("source_declaration_"):
+                    source_declarations.append({"fact_key": fact.key, "data": json.loads(fact.value)})
+                elif (
+                    fact.key.startswith("bom_candidate_")
+                    and fact.key.removeprefix("bom_candidate_").isdigit()
+                ):
+                    bom_candidates.append({"fact_key": fact.key, "data": json.loads(fact.value)})
             except json.JSONDecodeError:
                 continue
 
-        return f"""
+        return f'''
 {prompt}
 
 ADDITIONAL FINDING-SPECIFIC GRADLE CONSTRAINT PROVENANCE:
-
 {json.dumps(constraints, indent=2)}
 
 SOURCE-LEVEL GRADLE DECLARATIONS:
-
 {json.dumps(source_declarations, indent=2)}
+
+DYNAMIC GRADLE BOM CANDIDATE INVESTIGATION:
+{json.dumps(bom_candidates, indent=2)}
 
 HOW TO REASON ABOUT THE EVIDENCE:
 
-1. Reconstruct the dependency flow for each affected module using
-   dependency paths, introducing dependency declarations, and
-   resolved Gradle constraints.
+1. Reconstruct dependency flow for each affected module using dependency
+   paths, source declarations and resolved Gradle constraints.
 
 2. Treat declaration identity and dependency-path identity separately.
-   One source declaration may participate in multiple paths. Do not
-   duplicate the declaration, and do not discard any observed paths.
+   One source declaration may participate in multiple paths.
 
-3. Interpret declaration_relationship as whether the declaration is
-   directly written in that module's build file. Interpret
-   vulnerable_dependency_relationship as whether the vulnerable
-   component is direct or transitive from that declaration. These
-   fields describe different relationships and must never be
-   substituted for one another.
+3. declaration_relationship describes whether a declaration is written
+   in that module's build file. vulnerable_dependency_relationship
+   describes whether the vulnerable component is direct or transitive.
 
-4. A platform declaration is source-level evidence that the module
-   declares that platform. Its constraint_provenance describes how
-   Gradle resolved the relevant constraint. Do not infer that the
-   vulnerable dependency itself is direct merely because the BOM
-   declaration is direct.
+4. A platform declaration is source-level evidence. Constraint provenance
+   is resolution evidence. Do not conflate the two.
 
-5. Correlate declarations across paths. Multiple paths to the same
-   vulnerable component do not necessarily represent multiple
-   independent version sources.
+5. Look for a shared version authority. For example, if a module declares
+   one Jackson BOM and Gradle constraint provenance shows that this BOM
+   supplies the selected version of jackson-databind, treat the BOM as a
+   candidate shared control point for the Jackson modules it constrains.
 
-6. Look for a shared version authority. For example, if a module
-   declares one Jackson BOM and Gradle constraint provenance shows
-   that this BOM supplies the selected version of jackson-databind,
-   treat the BOM as a candidate shared control point for the
-   Jackson modules it constrains.
-
-7. If several transitive paths converge on the same BOM or platform,
+6. If several transitive paths converge on the same BOM or platform,
    explicitly consider upgrading that BOM once instead of proposing
    separate overrides for every transitive path.
 
-8. Do not assume that a BOM controls every dependency merely because
-   it appears somewhere in the graph. Require matching component
-   coordinates and relevant Gradle constraint evidence.
+5. A BOM that arrives transitively must not be treated as a directly
+   editable source declaration. Identify the direct introducing dependency.
 
-9. Distinguish a BOM declared directly by the affected module from
-   a BOM that arrives transitively through another dependency.
-   Do not recommend editing a transitive library's build file.
+6. Effective Gradle property values are separate from repository-file
+   candidates. Use effective_property_value only when
+   effective_property_status is RESOLVED.
 
-10. Compare candidate remediation strategies:
-    - Upgrade the shared BOM or platform.
-    - Upgrade the direct introducing dependency.
-    - Upgrade a higher-level parent dependency.
-    - Upgrade the vulnerable component directly.
-    - Use a dependency constraint or override only when justified.
+7. Candidate selectors such as 2.13.+ and 2.+ are search selectors, not
+   recommended versions. selected_bom_version is the actual version Gradle
+   resolved through the repository's configured repositories.
 
-11. Prefer the smallest change that fixes the vulnerable selected
-    version across all affected paths. Do not create one change per
-    path when a single shared source can explain those paths.
+8. Candidate BOM experiments temporarily add a platform dependency to the
+   affected configuration in an isolated Gradle invocation. They do not
+   modify build files and do not prove that changing one existing source
+   declaration would affect every module in the same way.
 
-12. A declaration's presence is source-level evidence. A Gradle
-    constraint edge is resolution evidence. A candidate property
-    value is not proof of the effective Gradle property value.
-    Keep these evidence types distinct.
+9. Inspect target_selected_version for each module. exact_scanner_fixed_match
+   means the selected version exactly matches a scanner-reported fixed
+   version. Do not claim a non-exact version is fixed merely because it is
+   numerically higher.
 
-13. If one source appears to control multiple paths, explain exactly
-    which evidence supports that conclusion and which paths it covers.
-    If the evidence is incomplete, state what is missing instead of
-    presenting the source as confirmed.
+10. A RESOLVED experiment establishes only the dependency selection observed
+    in that configuration with the temporary platform. It does not establish
+    source-level compatibility, successful compilation, passing tests,
+    runtime behaviour or post-change scanner results.
 
-14. Do not claim a proposed upgrade is compatible or tested unless
-    the supplied evidence establishes that. Recommend targeted
-    compatibility checks where needed.
+11. Compare results across all affected modules. A candidate that fixes
+    only some modules is not a complete repository-wide remediation.
 
-15. Return multiple materially different remediation strategies
-    when evidence supports them, and rank them by safety and scope.
-    Do not return duplicate recommendations for the same underlying
-    source change.
+12. Compare a BOM upgrade with direct property changes, introducing
+    dependency upgrades and explicit constraints. Do not assume the BOM
+    is the sole authority.
 
-The affected dependency paths should be understood as a connected
-dependency graph, not as unrelated findings.
-""".strip()
+13. If the evidence does not prove one source change fixes all affected
+    paths, keep the recommendation manual and state what remains unverified.
+    Do not invent BOM versions or compatibility facts.
+
+14. Return materially different remediation strategies only when the
+    supplied evidence supports them. Never claim an experiment has tested
+    the actual repository after a source change.
+'''.strip()
