@@ -74,20 +74,21 @@ class FakeInspector:
         return self.inspection
 
 
-def create_transitive_inspection():
+def create_transitive_inspection(paths=None):
     finding = create_finding()
+    dependency_paths = paths or (
+        (
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
+    )
 
     match = ModuleMatch(
         project_path=":service",
         build_file="service/build.gradle.kts",
         command_output="dependency path",
         resolved_version=finding.current_version,
-        dependency_paths=(
-            (
-                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
-                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
-            ),
-        ),
+        dependency_paths=dependency_paths,
     )
 
     return RepositoryInspection(
@@ -99,9 +100,8 @@ def create_transitive_inspection():
     )
 
 
-def test_inspector_finds_introducing_dependency_and_bom_declaration():
+def test_direct_declaration_can_introduce_transitive_vulnerable_dependency():
     finding = create_finding()
-
     build_file = """
 dependencies {
     implementation(
@@ -112,61 +112,88 @@ dependencies {
     )
 }
 """
-
     tools = FakeRepositoryTools({"service/build.gradle.kts": build_file})
-    inspection = create_transitive_inspection()
-
     result = ConstraintAwareRepositoryInspector(
-        FakeInspector(inspection, tools)
+        FakeInspector(create_transitive_inspection(), tools)
     ).inspect(finding)
 
     assert len(result.source_declarations) == 2
+    declarations = {item.dependency: item for item in result.source_declarations}
 
-    dependencies = {item.dependency: item for item in result.source_declarations}
-
-    introducing = dependencies["com.fasterxml.jackson.datatype:jackson-datatype-jsr310"]
-
-    assert introducing.relationship.value == "TRANSITIVE"
-    assert introducing.dependency_path == (
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
-        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+    introducing = declarations[
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"
+    ]
+    assert introducing.declaration_relationship.value == "DIRECT"
+    assert introducing.vulnerable_dependency_relationship.value == "TRANSITIVE"
+    assert introducing.dependency_paths == (
+        (
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
     )
     assert "jackson-datatype-jsr310" in introducing.declaration
 
-    bom = dependencies["com.fasterxml.jackson:jackson-bom"]
-
+    bom = declarations["com.fasterxml.jackson:jackson-bom"]
     assert bom.declaration_kind == "PLATFORM"
-    assert "jackson-bom" in bom.declaration
-    assert bom.relationship.value == "UNKNOWN"
+    assert bom.declaration_relationship.value == "DIRECT"
+    assert bom.vulnerable_dependency_relationship.value == "UNKNOWN"
+    assert bom.constraint_provenance == ()
+
+
+def test_same_declaration_is_deduplicated_and_all_paths_are_retained():
+    finding = create_finding()
+    first_path = (
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+    )
+    second_path = (
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+        "com.fasterxml.jackson.core:jackson-module-parameter-names:2.13.4",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+    )
+    build_file = """
+dependencies {
+    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4")
+}
+"""
+    tools = FakeRepositoryTools({"service/build.gradle.kts": build_file})
+    result = ConstraintAwareRepositoryInspector(
+        FakeInspector(
+            create_transitive_inspection((first_path, second_path)),
+            tools,
+        )
+    ).inspect(finding)
+
+    datatype_declarations = [
+        item for item in result.source_declarations
+        if item.dependency == "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"
+    ]
+    assert len(datatype_declarations) == 1
+    assert datatype_declarations[0].declaration_relationship.value == "DIRECT"
+    assert datatype_declarations[0].vulnerable_dependency_relationship.value == "TRANSITIVE"
+    assert datatype_declarations[0].dependency_paths == (first_path, second_path)
 
 
 def test_inspector_follows_project_dependency_to_source_module():
     finding = create_finding()
-
     app_build_file = """
 dependencies {
     implementation(project(":service"))
 }
 """
-
     service_build_file = """
 dependencies {
-    implementation(
-        platform("com.fasterxml.jackson:jackson-bom:2.13.4")
-    )
     implementation(
         "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4"
     )
 }
 """
-
     tools = FakeRepositoryTools(
         {
             "app/build.gradle.kts": app_build_file,
             "service/build.gradle.kts": service_build_file,
         }
     )
-
     app_match = ModuleMatch(
         project_path=":app",
         build_file="app/build.gradle.kts",
@@ -180,7 +207,6 @@ dependencies {
             ),
         ),
     )
-
     inspection = RepositoryInspection(
         finding_id=finding.id,
         configuration="runtimeClasspath",
@@ -188,74 +214,61 @@ dependencies {
         is_consistent=True,
         transitive_matches=(app_match,),
     )
-
     modules = (
-        SimpleNamespace(
-            project_path=":app",
-            build_file="app/build.gradle.kts",
-        ),
-        SimpleNamespace(
-            project_path=":service",
-            build_file="service/build.gradle.kts",
-        ),
+        SimpleNamespace(project_path=":app", build_file="app/build.gradle.kts"),
+        SimpleNamespace(project_path=":service", build_file="service/build.gradle.kts"),
     )
 
     result = ConstraintAwareRepositoryInspector(
         FakeInspector(inspection, tools, modules)
     ).inspect(finding)
 
-    assert any(
-        item.module_path == ":service"
+    service_declarations = [
+        item for item in result.source_declarations
+        if item.module_path == ":service"
         and item.dependency == "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"
-        for item in result.source_declarations
-    )
-
+    ]
+    assert len(service_declarations) == 1
+    assert service_declarations[0].declaration_relationship.value == "DIRECT"
+    assert service_declarations[0].vulnerable_dependency_relationship.value == "TRANSITIVE"
     assert "service/build.gradle.kts" in tools.reads
 
 
-def test_context_builder_passes_source_declarations_to_ai_facts():
+def test_context_builder_serializes_relationships_and_paths_separately():
     finding = create_finding()
-
     build_file = """
 dependencies {
-    implementation(
-        platform("com.fasterxml.jackson:jackson-bom:2.13.4")
-    )
-    implementation(
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4"
-    )
+    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4")
 }
 """
-
     tools = FakeRepositoryTools({"service/build.gradle.kts": build_file})
-    inspection = create_transitive_inspection()
-
-    enriched_inspection = ConstraintAwareRepositoryInspector(
-        FakeInspector(inspection, tools)
+    inspection = ConstraintAwareRepositoryInspector(
+        FakeInspector(create_transitive_inspection(), tools)
     ).inspect(finding)
 
     context = ConstraintAwareAIRecommendationContextBuilder().build(
         finding,
-        enriched_inspection,
+        inspection,
+    )
+    facts = [
+        fact for fact in context.facts
+        if fact.key.startswith("source_declaration_")
+    ]
+    payloads = [json.loads(fact.value) for fact in facts]
+    introducing = next(
+        payload for payload in payloads
+        if payload["dependency"].endswith("jackson-datatype-jsr310")
     )
 
-    declaration_facts = [
-        fact for fact in context.facts if fact.key.startswith("source_declaration_")
-    ]
-
-    assert len(declaration_facts) == 2
-
-    payloads = [json.loads(fact.value) for fact in declaration_facts]
-
-    assert {payload["dependency"] for payload in payloads} == {
-        "com.fasterxml.jackson:jackson-bom",
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310",
-    }
+    assert introducing["declaration_relationship"] == "DIRECT"
+    assert introducing["vulnerable_dependency_relationship"] == "TRANSITIVE"
+    assert len(introducing["dependency_paths"]) == 1
+    assert "relationship" not in introducing
+    assert "dependency_path" not in introducing
 
 
 def test_copilot_prompt_explains_shared_version_authority():
     finding = create_finding()
-
     build_file = """
 dependencies {
     implementation(
@@ -266,19 +279,14 @@ dependencies {
     )
 }
 """
-
     tools = FakeRepositoryTools({"service/build.gradle.kts": build_file})
-    inspection = create_transitive_inspection()
-
-    enriched_inspection = ConstraintAwareRepositoryInspector(
-        FakeInspector(inspection, tools)
+    inspection = ConstraintAwareRepositoryInspector(
+        FakeInspector(create_transitive_inspection(), tools)
     ).inspect(finding)
-
     context = ConstraintAwareAIRecommendationContextBuilder().build(
         finding,
-        enriched_inspection,
+        inspection,
     )
-
     prompt = ConstraintAwareCopilotRecommendationProvider._build_prompt(
         finding,
         context,
@@ -289,3 +297,6 @@ dependencies {
     assert "source_declaration_1" in prompt
     assert "jackson-bom" in prompt
     assert "jackson-datatype-jsr310" in prompt
+    assert "declaration_relationship" in prompt
+    assert "vulnerable_dependency_relationship" in prompt
+    assert "constraint_provenance" in prompt

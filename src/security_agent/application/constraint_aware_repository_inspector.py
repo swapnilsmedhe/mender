@@ -22,14 +22,36 @@ from security_agent.domain.finding import SecurityFinding
 
 
 @dataclass(frozen=True)
+class ConstraintSourceProvenance:
+    """Resolution evidence linking a declared platform to a selected constraint."""
+
+    source_relationship: DependencyRelationship
+    provenance_path: tuple[str, ...]
+    requested_component: str
+    selected_component: str
+    selection_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class SourceDeclaration:
+    """
+    One unique dependency or platform declaration in a Gradle module.
+
+    Declaration relationship describes how the declaration appears in this
+    module's build file. Vulnerable dependency relationship describes how the
+    vulnerable component is reached from the declaration. These are distinct
+    facts and must not be conflated.
+    """
+
     module_path: str
     manifest_file: str
     dependency: str
     declaration: str
     declaration_kind: str
-    relationship: DependencyRelationship
-    dependency_path: tuple[str, ...] = ()
+    declaration_relationship: DependencyRelationship
+    vulnerable_dependency_relationship: DependencyRelationship
+    dependency_paths: tuple[tuple[str, ...], ...] = ()
+    constraint_provenance: tuple[ConstraintSourceProvenance, ...] = ()
     source_type: str | None = None
     property_name: str | None = None
     lookup_scope: str | None = None
@@ -70,8 +92,8 @@ class ConstraintAwareRepositoryInspector:
     """
     Decorate RepositoryInspector with finding-specific Gradle evidence.
 
-    The Gradle report is collected once by the wrapped inspector and
-    reused for constraint and source declaration analysis.
+    The Gradle report is collected once by the wrapped inspector and reused
+    for constraint and source declaration analysis.
     """
 
     MAX_SOURCE_DECLARATIONS = 30
@@ -161,18 +183,17 @@ class ConstraintAwareRepositoryInspector:
                 # discovery cannot be repeated.
                 pass
 
-        # Each request identifies a component declaration to locate
-        # in a particular module build file.
+        # Requests are grouped by module and component. Multiple dependency
+        # paths to the same component are retained on the same request.
         requests: dict[
-            str, list[tuple[str, DependencyRelationship, tuple[str, ...]]]
+            str, dict[str, list[tuple[str, ...]]]
         ] = {}
 
         for match in inspection.matches:
             self._add_request(
                 requests,
                 match.project_path,
-                finding.component,
-                DependencyRelationship.DIRECT,
+                self._component_key(finding.component) or finding.component,
                 (finding.component,),
             )
 
@@ -181,8 +202,8 @@ class ConstraintAwareRepositoryInspector:
                 if not path:
                     continue
 
-                # A path may begin with an external dependency declared
-                # by the affected module.
+                # The first external component is the declaration candidate
+                # in the affected consumer module.
                 first_component = self._component_key(path[0])
 
                 if first_component is not None:
@@ -190,13 +211,12 @@ class ConstraintAwareRepositoryInspector:
                         requests,
                         match.project_path,
                         first_component,
-                        DependencyRelationship.TRANSITIVE,
                         path,
                     )
 
-                # It may also cross one or more Gradle project boundaries.
-                # The declaration after "project :module" belongs to
-                # that module's build file, not necessarily the consumer.
+                # A project boundary changes the source module. The
+                # declaration following "project :module" belongs to that
+                # module's build file.
                 for index, component in enumerate(path[:-1]):
                     module_path = self._project_path(component)
 
@@ -215,27 +235,27 @@ class ConstraintAwareRepositoryInspector:
                         requests,
                         module_path,
                         next_component,
-                        DependencyRelationship.TRANSITIVE,
                         path[index + 1 :],
                     )
 
         resolver = GradleVersionSourceResolver(tools)
         declarations: list[SourceDeclaration] = []
-        seen: set[tuple] = set()
+        declaration_indexes: dict[tuple, int] = {}
 
-        # IMPORTANT:
-        # A constraint source is scoped to the project whose Gradle
-        # configuration produced that constraint. Matching only by
-        # component coordinates incorrectly associates a BOM declaration
-        # in one module with constraints from other modules.
-        constraints_by_source: dict[tuple[str, str], list[DependencyConstraint]] = {}
+        # Constraint provenance is deliberately scoped to the module whose
+        # Gradle configuration produced the constraint.
+        constraints_by_source: dict[
+            tuple[str, str], list[DependencyConstraint]
+        ] = {}
 
         for constraint in constraints:
-            key = self._component_key(constraint.source_component)
+            source_key = self._component_key(constraint.source_component)
 
-            if key is not None:
-                scoped_key = (constraint.module_path, key)
-                constraints_by_source.setdefault(scoped_key, []).append(constraint)
+            if source_key is not None:
+                constraints_by_source.setdefault(
+                    (constraint.module_path, source_key),
+                    [],
+                ).append(constraint)
 
         for module_path, module_requests in requests.items():
             manifest_file = module_build_files.get(module_path)
@@ -256,7 +276,7 @@ class ConstraintAwareRepositoryInspector:
             if not isinstance(content, str):
                 continue
 
-            for component, relationship, dependency_path in module_requests:
+            for component, dependency_paths in module_requests.items():
                 requested_finding = replace(
                     finding,
                     component=component,
@@ -273,49 +293,39 @@ class ConstraintAwareRepositoryInspector:
 
                 for evidence in evidence_items:
                     if evidence.declaration_kind == "PLATFORM":
-                        # Only constraints from the same module can
-                        # establish the provenance of this declaration.
                         related_constraints = constraints_by_source.get(
                             (module_path, evidence.dependency),
                             (),
                         )
 
-                        if related_constraints:
-                            for constraint in related_constraints:
-                                self._append_evidence(
-                                    declarations,
-                                    seen,
-                                    self._to_source_declaration(
-                                        module_path,
-                                        manifest_file,
-                                        evidence,
-                                        constraint.source_relationship,
-                                        constraint.provenance_path,
-                                    ),
-                                )
-                        else:
-                            self._append_evidence(
-                                declarations,
-                                seen,
-                                self._to_source_declaration(
-                                    module_path,
-                                    manifest_file,
-                                    evidence,
-                                    DependencyRelationship.UNKNOWN,
-                                    (),
-                                ),
-                            )
+                        provenance = tuple(
+                            self._to_constraint_provenance(item)
+                            for item in related_constraints
+                        )
+
+                        self._append_evidence(
+                            declarations,
+                            declaration_indexes,
+                            self._to_source_declaration(
+                                module_path=module_path,
+                                manifest_file=manifest_file,
+                                evidence=evidence,
+                                finding=finding,
+                                dependency_paths=(),
+                                constraint_provenance=provenance,
+                            ),
+                        )
                         continue
 
                     self._append_evidence(
                         declarations,
-                        seen,
+                        declaration_indexes,
                         self._to_source_declaration(
-                            module_path,
-                            manifest_file,
-                            evidence,
-                            relationship,
-                            dependency_path,
+                            module_path=module_path,
+                            manifest_file=manifest_file,
+                            evidence=evidence,
+                            finding=finding,
+                            dependency_paths=tuple(dependency_paths),
                         ),
                     )
 
@@ -326,26 +336,22 @@ class ConstraintAwareRepositoryInspector:
 
     @staticmethod
     def _add_request(
-        requests,
+        requests: dict[str, dict[str, list[tuple[str, ...]]]],
         module_path: str,
         component: str,
-        relationship: DependencyRelationship,
         dependency_path: tuple[str, ...],
     ) -> None:
-        entries = requests.setdefault(module_path, [])
-        request = (component, relationship, dependency_path)
+        module_requests = requests.setdefault(module_path, {})
+        paths = module_requests.setdefault(component, [])
 
-        if request not in entries:
-            entries.append(request)
+        if dependency_path and dependency_path not in paths:
+            paths.append(dependency_path)
 
     @staticmethod
     def _component_key(component: str) -> str | None:
         parts = component.split(":")
 
-        if len(parts) < 2:
-            return None
-
-        if parts[0].startswith("project "):
+        if len(parts) < 2 or parts[0].startswith("project "):
             return None
 
         return f"{parts[0]}:{parts[1]}"
@@ -365,21 +371,49 @@ class ConstraintAwareRepositoryInspector:
         return project_path
 
     @staticmethod
+    def _to_constraint_provenance(
+        constraint: DependencyConstraint,
+    ) -> ConstraintSourceProvenance:
+        return ConstraintSourceProvenance(
+            source_relationship=constraint.source_relationship,
+            provenance_path=constraint.provenance_path,
+            requested_component=constraint.requested,
+            selected_component=constraint.selected,
+            selection_reason=constraint.selection_reason,
+        )
+
+    @staticmethod
     def _to_source_declaration(
         module_path: str,
         manifest_file: str,
         evidence: VersionSourceEvidence,
-        relationship: DependencyRelationship,
-        dependency_path: tuple[str, ...],
+        finding: SecurityFinding,
+        dependency_paths: tuple[tuple[str, ...], ...],
+        constraint_provenance: tuple[ConstraintSourceProvenance, ...] = (),
     ) -> SourceDeclaration:
+        vulnerable_component_key = (
+            ConstraintAwareRepositoryInspector._component_key(finding.component)
+            or finding.component
+        )
+
+        vulnerable_relationship = DependencyRelationship.UNKNOWN
+
+        if evidence.declaration_kind == "DEPENDENCY":
+            if evidence.dependency == vulnerable_component_key:
+                vulnerable_relationship = DependencyRelationship.DIRECT
+            elif dependency_paths:
+                vulnerable_relationship = DependencyRelationship.TRANSITIVE
+
         return SourceDeclaration(
             module_path=module_path,
             manifest_file=manifest_file,
             dependency=evidence.dependency,
             declaration=evidence.declaration,
             declaration_kind=evidence.declaration_kind,
-            relationship=relationship,
-            dependency_path=dependency_path,
+            declaration_relationship=DependencyRelationship.DIRECT,
+            vulnerable_dependency_relationship=vulnerable_relationship,
+            dependency_paths=dependency_paths,
+            constraint_provenance=constraint_provenance,
             source_type=evidence.source_type,
             property_name=evidence.property_name,
             lookup_scope=evidence.lookup_scope,
@@ -393,22 +427,41 @@ class ConstraintAwareRepositoryInspector:
     @staticmethod
     def _append_evidence(
         declarations: list[SourceDeclaration],
-        seen: set[tuple],
+        indexes: dict[tuple, int],
         evidence: SourceDeclaration,
     ) -> None:
+        # Declaration identity is independent of the paths through which
+        # the declaration participates in the resolved graph.
         key = (
             evidence.module_path,
             evidence.manifest_file,
             evidence.dependency,
             evidence.declaration_kind,
             evidence.declaration,
-            evidence.relationship,
-            evidence.dependency_path,
         )
 
-        if key not in seen:
-            seen.add(key)
+        existing_index = indexes.get(key)
+
+        if existing_index is None:
+            indexes[key] = len(declarations)
             declarations.append(evidence)
+            return
+
+        existing = declarations[existing_index]
+        merged_paths = tuple(
+            dict.fromkeys((*existing.dependency_paths, *evidence.dependency_paths))
+        )
+        merged_provenance = tuple(
+            dict.fromkeys(
+                (*existing.constraint_provenance, *evidence.constraint_provenance)
+            )
+        )
+
+        declarations[existing_index] = replace(
+            existing,
+            dependency_paths=merged_paths,
+            constraint_provenance=merged_provenance,
+        )
 
     @staticmethod
     def _to_constraint_aware(

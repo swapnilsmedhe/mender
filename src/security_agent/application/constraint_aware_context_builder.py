@@ -10,8 +10,9 @@ from security_agent.domain.finding import SecurityFinding
 
 class ConstraintAwareAIRecommendationContextBuilder(AIRecommendationContextBuilder):
     """
-    Extend the normal AI context with Gradle constraints and the
-    source declarations that explain affected dependency paths.
+    Extend the normal AI context with Gradle constraints and source
+    declarations. Declaration identity, vulnerability relationship and
+    constraint provenance are serialized as separate evidence.
     """
 
     MAX_DECLARATION_FACTS = 20
@@ -79,8 +80,25 @@ class ConstraintAwareAIRecommendationContextBuilder(AIRecommendationContextBuild
                 "manifest": declaration.manifest_file,
                 "dependency": declaration.dependency,
                 "declaration_kind": declaration.declaration_kind,
-                "relationship": declaration.relationship.value,
-                "dependency_path": list(declaration.dependency_path),
+                "declaration_relationship": (
+                    declaration.declaration_relationship.value
+                ),
+                "vulnerable_dependency_relationship": (
+                    declaration.vulnerable_dependency_relationship.value
+                ),
+                "dependency_paths": [
+                    list(path) for path in declaration.dependency_paths
+                ],
+                "constraint_provenance": [
+                    {
+                        "source_relationship": item.source_relationship.value,
+                        "provenance_path": list(item.provenance_path),
+                        "requested_component": item.requested_component,
+                        "selected_component": item.selected_component,
+                        "selection_reason": item.selection_reason,
+                    }
+                    for item in declaration.constraint_provenance
+                ],
                 "declaration": declaration.declaration,
                 "version_source": {
                     "type": declaration.source_type,
@@ -89,7 +107,7 @@ class ConstraintAwareAIRecommendationContextBuilder(AIRecommendationContextBuild
                     "source_file": declaration.source_file,
                     "declared_version": declaration.declared_version,
                     "resolved": declaration.source_resolved,
-                    "candidate_source_file": (declaration.candidate_source_file),
+                    "candidate_source_file": declaration.candidate_source_file,
                     "candidate_value": declaration.candidate_value,
                 },
             }

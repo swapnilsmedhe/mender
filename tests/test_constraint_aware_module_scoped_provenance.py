@@ -89,14 +89,12 @@ def create_constraint(
 
 def test_bom_declaration_only_receives_same_module_constraint_provenance():
     finding = create_finding()
-
     build_file = """
 dependencies {
     implementation(platform("com.fasterxml.jackson:jackson-bom:2.13.4"))
     implementation("com.fasterxml.jackson.core:jackson-databind")
 }
 """
-
     inspection = RepositoryInspection(
         finding_id=finding.id,
         configuration="runtimeClasspath",
@@ -112,7 +110,6 @@ dependencies {
             ),
         ),
     )
-
     constraints = (
         create_constraint(
             ":bom-consumer",
@@ -141,31 +138,24 @@ dependencies {
             ),
         ),
     )
-
     tools = FakeRepositoryTools({"bom-consumer/build.gradle.kts": build_file})
-
     inspector = ConstraintAwareRepositoryInspector(
         FakeInspector(inspection, tools),
         constraint_collector=FakeConstraintCollector(constraints),
     )
 
     result = inspector.inspect(finding)
-
     bom_declarations = [
-        declaration
-        for declaration in result.source_declarations
-        if declaration.dependency == "com.fasterxml.jackson:jackson-bom"
+        item for item in result.source_declarations
+        if item.dependency == "com.fasterxml.jackson:jackson-bom"
     ]
 
     assert len(bom_declarations) == 1
-
-    bom_declaration = bom_declarations[0]
-
-    assert bom_declaration.module_path == ":bom-consumer"
-    assert bom_declaration.relationship == DependencyRelationship.DIRECT
-    assert bom_declaration.dependency_path == (BOM,)
-
-    # Constraints from other modules must not be attached to this
-    # source declaration, even though their BOM coordinates match.
-    assert "direct-consumer" not in bom_declaration.dependency_path
-    assert "service" not in bom_declaration.dependency_path
+    bom = bom_declarations[0]
+    assert bom.module_path == ":bom-consumer"
+    assert bom.declaration_relationship == DependencyRelationship.DIRECT
+    assert bom.vulnerable_dependency_relationship == DependencyRelationship.UNKNOWN
+    assert len(bom.constraint_provenance) == 1
+    assert bom.constraint_provenance[0].source_relationship == DependencyRelationship.DIRECT
+    assert bom.constraint_provenance[0].provenance_path == (BOM,)
+    assert "direct-consumer" not in " ".join(bom.constraint_provenance[0].provenance_path)

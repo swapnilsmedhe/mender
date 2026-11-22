@@ -31,7 +31,6 @@ def create_finding():
 
 def test_adds_inspection_constraints_to_ai_context():
     finding = create_finding()
-
     constraint = DependencyConstraint(
         module_path=":bom-consumer",
         manifest_file="bom-consumer/build.gradle.kts",
@@ -39,7 +38,6 @@ def test_adds_inspection_constraints_to_ai_context():
         requested="com.fasterxml.jackson.core:jackson-databind:2.15.2",
         selected="com.fasterxml.jackson.core:jackson-databind:2.15.2",
     )
-
     inspection = ConstraintAwareRepositoryInspection(
         finding_id=finding.id,
         configuration="runtimeClasspath",
@@ -63,29 +61,23 @@ def test_adds_inspection_constraints_to_ai_context():
         finding,
         inspection,
     )
-
     assert context.constraints == (constraint,)
     assert context.dependency_name == finding.component
     assert context.resolved_version == finding.current_version
 
 
 def test_does_not_add_constraints_for_ordinary_inspection():
+    from security_agent.application.repository_inspector import RepositoryInspection
+
     finding = create_finding()
-
-    from security_agent.application.repository_inspector import (
-        RepositoryInspection,
-    )
-
     inspection = RepositoryInspection(
         finding_id=finding.id,
         configuration="runtimeClasspath",
         command_output="",
         is_consistent=True,
     )
-
     context = ConstraintAwareAIRecommendationContextBuilder().build(
         finding,
         inspection,
     )
-
     assert context.constraints == ()
