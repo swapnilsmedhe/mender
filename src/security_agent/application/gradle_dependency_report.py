@@ -17,6 +17,7 @@ class GradleDependencyEdge:
     selected: str | None
     is_constraint: bool
     status: str
+    selection_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class GradleDependencyGraph:
         target_component: str,
         max_paths: int = 100,
     ) -> tuple[tuple[str, ...], ...]:
-        """Return paths from a project root to a target component."""
+        """Return ordinary dependency paths from a project root."""
         if not project_path.strip():
             raise ValueError("Project path cannot be empty.")
 
@@ -102,34 +103,27 @@ class GradleDependencyGraph:
         project_path: str,
         target_component: str,
     ) -> tuple[GradleDependencyEdge, ...]:
-        """
-        Return resolved Gradle constraints that select the target component.
-
-        Constraints are kept separate from dependency paths because a BOM
-        or platform influences version selection but is not necessarily
-        an ordinary dependency in the path to the vulnerable component.
-        """
+        """Return resolved constraints selecting the target component."""
         if not project_path.strip():
             raise ValueError("Project path cannot be empty.")
 
         if not target_component.strip():
             raise ValueError("Target component cannot be empty.")
 
-        constraints = []
-
-        for edge in self.report.edges:
+        return tuple(
+            edge
+            for edge in self.report.edges
             if (
-                edge.project_path != project_path
-                or edge.status != "RESOLVED"
-                or not edge.is_constraint
-                or edge.selected is None
-            ):
-                continue
-
-            if self._matches_component(edge.selected, target_component):
-                constraints.append(edge)
-
-        return tuple(constraints)
+                edge.project_path == project_path
+                and edge.status == "RESOLVED"
+                and edge.is_constraint
+                and edge.selected is not None
+                and self._matches_component(
+                    edge.selected,
+                    target_component,
+                )
+            )
+        )
 
     @staticmethod
     def _matches_component(
@@ -226,7 +220,9 @@ class GradleDependencyReportCollector:
             if line.startswith(cls.EDGE_MARKER + "\t"):
                 parts = line.split("\t")
 
-                if len(parts) != 8:
+                # Eight fields preserve compatibility with reports
+                # generated before selection reasons were added.
+                if len(parts) not in (8, 9):
                     continue
 
                 try:
@@ -237,6 +233,7 @@ class GradleDependencyReportCollector:
                     selected_value = cls._decode(parts[5])
                     constraint_value = cls._decode(parts[6])
                     status = cls._decode(parts[7])
+                    selection_reason = cls._decode(parts[8]) if len(parts) == 9 else ""
                 except (ValueError, UnicodeDecodeError):
                     continue
 
@@ -252,6 +249,7 @@ class GradleDependencyReportCollector:
                         selected=selected_value or None,
                         is_constraint=constraint_value == "true",
                         status=status,
+                        selection_reason=selection_reason,
                     )
                 )
 
@@ -296,7 +294,7 @@ def encodeValue = { value ->
 }
 
 def emitEdge = { projectPath, configuration, from, requested,
-                 selected, isConstraint, status ->
+                 selected, isConstraint, status, selectionReason ->
     println(
         "SECURITY_AGENT_EDGE\t" +
         encodeValue(projectPath) + "\t" +
@@ -305,7 +303,8 @@ def emitEdge = { projectPath, configuration, from, requested,
         encodeValue(requested) + "\t" +
         encodeValue(selected ?: "") + "\t" +
         encodeValue(isConstraint.toString()) + "\t" +
-        encodeValue(status)
+        encodeValue(status) + "\t" +
+        encodeValue(selectionReason ?: "")
     )
 }
 
@@ -338,7 +337,7 @@ gradle.projectsEvaluated {
 
             def root = resolutionResult.root
             def queue = new ArrayList()
-            def visited = new LinkedHashSet()
+            def visitedEdges = new LinkedHashSet()
 
             root.dependencies.each { dependency ->
                 queue.add([root, dependency])
@@ -354,6 +353,13 @@ gradle.projectsEvaluated {
                     def fromId = from.id.displayName
                     def selectedId = selected.id.displayName
 
+                    def selectionReason =
+                        selected.selectionReason.descriptions
+                            .collect { descriptor -> descriptor.description }
+                            .findAll { description -> description }
+                            .unique()
+                            .join("; ")
+
                     emitEdge(
                         project.path,
                         configurationName,
@@ -361,10 +367,18 @@ gradle.projectsEvaluated {
                         dependency.requested.displayName,
                         selectedId,
                         dependency.isConstraint(),
-                        "RESOLVED"
+                        "RESOLVED",
+                        selectionReason
                     )
 
-                    if (visited.add(selectedId)) {
+                    def edgeKey = [
+                        fromId,
+                        selectedId,
+                        dependency.requested.displayName,
+                        dependency.isConstraint()
+                    ].join("|")
+
+                    if (visitedEdges.add(edgeKey)) {
                         selected.dependencies.each { child ->
                             queue.add([selected, child])
                         }
@@ -377,7 +391,8 @@ gradle.projectsEvaluated {
                         dependency.requested.displayName,
                         "",
                         dependency.isConstraint(),
-                        "UNRESOLVED"
+                        "UNRESOLVED",
+                        ""
                     )
                 }
             }

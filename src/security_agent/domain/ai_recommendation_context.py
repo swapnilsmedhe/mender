@@ -116,13 +116,17 @@ class DependencyConstraint:
     source_component: str
     requested: str
     selected: str
+    provenance_path: tuple[str, ...] = ()
+    source_relationship: DependencyRelationship = DependencyRelationship.UNKNOWN
+    selection_reason: str | None = None
 
     MAX_FIELD_LENGTH: ClassVar[int] = 500
+    MAX_PATH_ENTRIES: ClassVar[int] = 10
 
     def __post_init__(self) -> None:
         fields = (
             ("Module path", self.module_path),
-            ("Manifest file", self.manifest_file),
+            ("Affected module manifest", self.manifest_file),
             ("Constraint source", self.source_component),
             ("Requested component", self.requested),
             ("Selected component", self.selected),
@@ -133,6 +137,24 @@ class DependencyConstraint:
                 raise ValueError(f"{label} cannot be empty.")
             if len(value) > self.MAX_FIELD_LENGTH:
                 raise ValueError(f"{label} is too long.")
+
+        if not isinstance(self.source_relationship, DependencyRelationship):
+            raise ValueError("Invalid constraint source relationship.")
+
+        if len(self.provenance_path) > self.MAX_PATH_ENTRIES:
+            raise ValueError("Constraint provenance path contains too many entries.")
+
+        for entry in self.provenance_path:
+            if not entry.strip():
+                raise ValueError("Constraint provenance path entries cannot be empty.")
+            if len(entry) > self.MAX_FIELD_LENGTH:
+                raise ValueError("Constraint provenance path entry is too long.")
+
+        if self.selection_reason is not None:
+            if not self.selection_reason.strip():
+                raise ValueError("Selection reason cannot be empty.")
+            if len(self.selection_reason) > self.MAX_FIELD_LENGTH:
+                raise ValueError("Selection reason is too long.")
 
 
 @dataclass(frozen=True)
@@ -217,7 +239,10 @@ class AIRecommendationContext:
                 + len(constraint.source_component)
                 + len(constraint.requested)
                 + len(constraint.selected)
+                + sum(len(entry) for entry in constraint.provenance_path)
             )
+            if constraint.selection_reason:
+                total += len(constraint.selection_reason)
 
         for fact in self.facts:
             total += len(fact.key) + len(fact.value)
