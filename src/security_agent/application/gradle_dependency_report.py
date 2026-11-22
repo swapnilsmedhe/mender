@@ -1,150 +1,280 @@
 
-import re
+import base64
+import os
+import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
+
+from security_agent.tools.repository import RepositoryTools
 
 
 @dataclass(frozen=True)
-class GradleReportEntry:
-    depth: int
-    notation: str
-    is_repeated: bool = False
-    is_runtime_classpath: bool = False
+class GradleDependencyEdge:
+    project_path: str
+    configuration: str
+    from_component: str
+    requested: str
+    selected: str | None
+    is_constraint: bool
+    status: str
 
 
 @dataclass(frozen=True)
 class GradleDependencyReport:
-    selected_dependency: str | None
-    entries: tuple[GradleReportEntry, ...]
-    is_selected_by_constraint: bool
-
-    @property
-    def repeated_entry_count(self) -> int:
-        return sum(entry.is_repeated for entry in self.entries)
-
-    @property
-    def runtime_classpath_entry_count(self) -> int:
-        return sum(
-            entry.is_runtime_classpath
-            for entry in self.entries
-        )
+    configuration: str
+    edges: tuple[GradleDependencyEdge, ...] = ()
+    errors: tuple[str, ...] = ()
 
 
-class GradleDependencyReportParser:
-    COORDINATE_PATTERN = re.compile(
-        r"(?P<group>[A-Za-z0-9_.-]+):"
-        r"(?P<artifact>[A-Za-z0-9_.-]+):"
-        r"(?P<version>[^\s()]+)"
-    )
+class GradleDependencyReportCollector:
+    EDGE_MARKER = "SECURITY_AGENT_EDGE"
+    ERROR_MARKER = "SECURITY_AGENT_REPORT_ERROR"
 
-    TREE_MARKER_PATTERN = re.compile(
-        r"(?P<indent>(?:\|    |     )*)"
-        r"(?P<branch>\+---|\\---)\s+"
-        r"(?P<content>.*)"
-    )
+    def __init__(
+        self,
+        tools: RepositoryTools,
+        timeout_seconds: int = 120,
+    ) -> None:
+        self.tools = tools
+        self.timeout_seconds = timeout_seconds
 
-    def parse(self, output: str) -> GradleDependencyReport:
-        lines = output.splitlines()
+    def collect(
+        self,
+        configuration: str = "runtimeClasspath",
+    ) -> GradleDependencyReport:
+        root = self.tools.root.resolve()
+        wrapper_name = "gradlew.bat" if os.name == "nt" else "gradlew"
+        wrapper = root / wrapper_name
 
-        selected_dependency = None
-        is_selected_by_constraint = False
-        entries = []
-
-        for line in lines:
-            stripped = line.strip()
-
-            if not stripped:
-                continue
-
-            if stripped.startswith("> Task"):
-                continue
-
-            if "(*)" in stripped:
-                is_repeated = True
-            else:
-                is_repeated = False
-
-            if stripped.endswith("(by constraint)"):
-                is_selected_by_constraint = True
-
-            coordinate_match = self.COORDINATE_PATTERN.search(
-                stripped
+        if not wrapper.is_file():
+            raise FileNotFoundError(
+                f"Gradle wrapper not found: {wrapper}"
             )
 
-            if (
-                selected_dependency is None
-                and coordinate_match
-                and not line[0].isspace()
-            ):
-                selected_dependency = (
-                    f"{coordinate_match.group('group')}:"
-                    f"{coordinate_match.group('artifact')}:"
-                    f"{coordinate_match.group('version')}"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = Path(temp_dir) / "dependency-report.init.gradle"
+            script_path.write_text(
+                self._create_init_script(),
+                encoding="utf-8",
+            )
+
+            command = [
+                str(wrapper),
+                "--init-script",
+                str(script_path),
+                f"-Pmender.configuration={configuration}",
+                "help",
+                "--console=plain",
+            ]
+
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "Gradle dependency report timed out."
+                ) from exc
+
+        output = f"{result.stdout}\n{result.stderr}"
+
+        report = self.parse_output(output, configuration)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Gradle dependency report execution failed.\n"
+                f"{output.strip()}"
+            )
+
+        return report
+
+    @classmethod
+    def parse_output(
+        cls,
+        output: str,
+        configuration: str,
+    ) -> GradleDependencyReport:
+        edges = []
+        errors = []
+
+        for line in output.splitlines():
+            if line.startswith(cls.EDGE_MARKER + "\t"):
+                parts = line.split("\t")
+
+                if len(parts) != 8:
+                    continue
+
+                try:
+                    project_path = cls._decode(parts[1])
+                    edge_configuration = cls._decode(parts[2])
+                    from_component = cls._decode(parts[3])
+                    requested = cls._decode(parts[4])
+                    selected_value = cls._decode(parts[5])
+                    constraint_value = cls._decode(parts[6])
+                    status = cls._decode(parts[7])
+                except (ValueError, UnicodeDecodeError):
+                    continue
+
+                if constraint_value not in ("true", "false"):
+                    continue
+
+                edges.append(
+                    GradleDependencyEdge(
+                        project_path=project_path,
+                        configuration=edge_configuration,
+                        from_component=from_component,
+                        requested=requested,
+                        selected=selected_value or None,
+                        is_constraint=constraint_value == "true",
+                        status=status,
+                    )
                 )
 
-            tree_match = self.TREE_MARKER_PATTERN.match(line)
+            elif line.startswith(cls.ERROR_MARKER + "\t"):
+                parts = line.split("\t")
 
-            if not tree_match:
-                continue
+                if len(parts) != 4:
+                    continue
 
-            content = tree_match.group("content").strip()
+                try:
+                    project_path = cls._decode(parts[1])
+                    edge_configuration = cls._decode(parts[2])
+                    message = cls._decode(parts[3])
+                except (ValueError, UnicodeDecodeError):
+                    continue
 
-            # Gradle repeats previously expanded dependency subtrees
-            # using (*). Preserve the occurrence as metadata, but
-            # never interpret it as another dependency path.
-            if is_repeated:
-                coordinate = self.COORDINATE_PATTERN.search(content)
-
-                if coordinate:
-                    notation = (
-                        f"{coordinate.group('group')}:"
-                        f"{coordinate.group('artifact')}:"
-                        f"{coordinate.group('version')}"
-                    )
-
-                    entries.append(
-                        GradleReportEntry(
-                            depth=self._depth(line, tree_match),
-                            notation=notation,
-                            is_repeated=True,
-                        )
-                    )
-
-                continue
-
-            if content.startswith("runtimeClasspath"):
-                entries.append(
-                    GradleReportEntry(
-                        depth=self._depth(line, tree_match),
-                        notation=content,
-                        is_runtime_classpath=True,
-                    )
-                )
-                continue
-
-            coordinate = self.COORDINATE_PATTERN.search(content)
-
-            if coordinate:
-                notation = (
-                    f"{coordinate.group('group')}:"
-                    f"{coordinate.group('artifact')}:"
-                    f"{coordinate.group('version')}"
-                )
-
-                entries.append(
-                    GradleReportEntry(
-                        depth=self._depth(line, tree_match),
-                        notation=notation,
-                    )
+                errors.append(
+                    f"{project_path} ({edge_configuration}): {message}"
                 )
 
         return GradleDependencyReport(
-            selected_dependency=selected_dependency,
-            entries=tuple(entries),
-            is_selected_by_constraint=is_selected_by_constraint,
+            configuration=configuration,
+            edges=tuple(edges),
+            errors=tuple(errors),
         )
 
     @staticmethod
-    def _depth(line: str, match: re.Match) -> int:
-        # Gradle's ASCII tree uses five-character indentation
-        # levels. The first branch is depth 1.
-        return match.start("branch") // 5 + 1
+    def _decode(value: str) -> str:
+        return base64.b64decode(
+            value,
+            validate=True,
+        ).decode("utf-8")
+
+    @staticmethod
+    def _create_init_script() -> str:
+        return r"""
+import java.util.Base64
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+
+def encodeValue = { value ->
+    Base64.encoder.encodeToString(
+        value.toString().getBytes("UTF-8")
+    )
+}
+
+def emitEdge = { projectPath, configuration, from, requested,
+                 selected, isConstraint, status ->
+    println(
+        "SECURITY_AGENT_EDGE\t" +
+        encodeValue(projectPath) + "\t" +
+        encodeValue(configuration) + "\t" +
+        encodeValue(from) + "\t" +
+        encodeValue(requested) + "\t" +
+        encodeValue(selected ?: "") + "\t" +
+        encodeValue(isConstraint.toString()) + "\t" +
+        encodeValue(status)
+    )
+}
+
+def emitError = { projectPath, configuration, message ->
+    println(
+        "SECURITY_AGENT_REPORT_ERROR\t" +
+        encodeValue(projectPath) + "\t" +
+        encodeValue(configuration) + "\t" +
+        encodeValue(message)
+    )
+}
+
+gradle.projectsEvaluated {
+    def configurationName =
+        gradle.startParameter.projectProperties[
+            "mender.configuration"
+        ] ?: "runtimeClasspath"
+
+    gradle.rootProject.allprojects.each { project ->
+        def configuration =
+            project.configurations.findByName(configurationName)
+
+        if (configuration == null) {
+            return
+        }
+
+        try {
+            def resolutionResult =
+                configuration.incoming.resolutionResult
+
+            def root = resolutionResult.root
+            def queue = new ArrayList()
+            def visited = new LinkedHashSet()
+
+            root.dependencies.each { dependency ->
+                queue.add([root, dependency])
+            }
+
+            while (!queue.isEmpty()) {
+                def item = queue.remove(0)
+                def from = item[0]
+                def dependency = item[1]
+
+                if (dependency instanceof ResolvedDependencyResult) {
+                    def selected = dependency.selected
+                    def fromId = from.id.displayName
+                    def selectedId = selected.id.displayName
+
+                    emitEdge(
+                        project.path,
+                        configurationName,
+                        fromId,
+                        dependency.requested.displayName,
+                        selectedId,
+                        dependency.isConstraint(),
+                        "RESOLVED"
+                    )
+
+                    if (visited.add(selectedId)) {
+                        selected.dependencies.each { child ->
+                            queue.add([selected, child])
+                        }
+                    }
+                } else {
+                    emitEdge(
+                        project.path,
+                        configurationName,
+                        from.id.displayName,
+                        dependency.requested.displayName,
+                        "",
+                        dependency.isConstraint(),
+                        "UNRESOLVED"
+                    )
+                }
+            }
+        } catch (Exception exception) {
+            emitError(
+                project.path,
+                configurationName,
+                exception.class.simpleName + ": " +
+                    (exception.message ?: "Unknown resolution error")
+            )
+        }
+    }
+}
+"""
+
+GradleDependencyReportParser = GradleDependencyReportCollector

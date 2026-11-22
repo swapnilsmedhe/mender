@@ -1,102 +1,134 @@
 
+import base64
+
 from security_agent.application.gradle_dependency_report import (
-    GradleDependencyReportParser,
+    GradleDependencyReportCollector,
 )
 
 
-DIRECT_CONSUMER_OUTPUT = """
-> Task :direct-consumer:dependencyInsight
-com.fasterxml.jackson.core:jackson-databind:2.13.4 (by constraint)
-  Variant runtimeElements:
-    | Attribute Name                     | Provided     | Requested    |
-
-com.fasterxml.jackson.core:jackson-databind:2.13.4
-+--- runtimeClasspath
-\\--- com.fasterxml.jackson:jackson-bom:2.13.4
-     +--- com.fasterxml.jackson.core:jackson-annotations:2.13.4
-     |    +--- com.fasterxml.jackson:jackson-bom:2.13.4 (*)
-     |    \\--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-     +--- com.fasterxml.jackson.core:jackson-core:2.13.4
-     |    +--- com.fasterxml.jackson:jackson-bom:2.13.4 (*)
-     |    \\--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-     \\--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-"""
+def encode(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
-BOM_CONSUMER_OUTPUT = """
-> Task :bom-consumer:dependencyInsight
-com.fasterxml.jackson.core:jackson-databind:2.13.4 (by constraint)
-  Variant runtimeElements:
-    | Attribute Name                     | Provided     | Requested    |
-
-com.fasterxml.jackson.core:jackson-databind:2.13.4
-+--- com.fasterxml.jackson:jackson-bom:2.13.4
-|    +--- runtimeClasspath
-|    +--- com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4
-|    |    +--- runtimeClasspath (requested com.fasterxml.jackson.datatype:jackson-datatype-jsr310)
-|    |    \\--- com.fasterxml.jackson:jackson-bom:2.13.4 (*)
-|    +--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-|    +--- com.fasterxml.jackson.core:jackson-annotations:2.13.4
-|    |    +--- com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4 (*)
-|    |    +--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-|    |    \\--- com.fasterxml.jackson:jackson-bom:2.13.4 (*)
-|    \\--- com.fasterxml.jackson.core:jackson-core:2.13.4
-|         +--- com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4 (*)
-|         +--- com.fasterxml.jackson.core:jackson-databind:2.13.4 (*)
-|         \\--- com.fasterxml.jackson:jackson-bom:2.13.4 (*)
-\\--- com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4 (*)
-
-com.fasterxml.jackson.core:jackson-databind -> 2.13.4
-\\--- runtimeClasspath
-"""
-
-
-def test_parses_direct_consumer_report():
-    report = GradleDependencyReportParser().parse(
-        DIRECT_CONSUMER_OUTPUT
+def edge_line(
+    project: str,
+    configuration: str,
+    source: str,
+    requested: str,
+    selected: str,
+    constraint: str,
+    status: str,
+) -> str:
+    values = (
+        project,
+        configuration,
+        source,
+        requested,
+        selected,
+        constraint,
+        status,
+    )
+    return "SECURITY_AGENT_EDGE\t" + "\t".join(
+        encode(value) for value in values
     )
 
-    assert report.selected_dependency == (
-        "com.fasterxml.jackson.core:jackson-databind:2.13.4"
+
+def test_parses_resolved_dependency_edge():
+    output = edge_line(
+        ":service",
+        "runtimeClasspath",
+        "project :service",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        "false",
+        "RESOLVED",
     )
 
-    assert report.is_selected_by_constraint
-    assert report.runtime_classpath_entry_count == 1
-    assert report.repeated_entry_count > 0
-
-
-def test_parses_bom_consumer_report():
-    report = GradleDependencyReportParser().parse(
-        BOM_CONSUMER_OUTPUT
+    report = GradleDependencyReportCollector.parse_output(
+        output,
+        "runtimeClasspath",
     )
 
-    assert report.selected_dependency == (
-        "com.fasterxml.jackson.core:jackson-databind:2.13.4"
+    assert report.errors == ()
+    assert len(report.edges) == 1
+
+    edge = report.edges[0]
+    assert edge.project_path == ":service"
+    assert edge.from_component == "project :service"
+    assert edge.requested.endswith(":2.13.4")
+    assert edge.selected.endswith(":2.13.4")
+    assert edge.is_constraint is False
+    assert edge.status == "RESOLVED"
+
+
+def test_parses_constraint_edge():
+    output = edge_line(
+        ":bom-consumer",
+        "runtimeClasspath",
+        "com.fasterxml.jackson:jackson-bom:2.13.4",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        "true",
+        "RESOLVED",
     )
 
-    assert report.is_selected_by_constraint
-    assert report.runtime_classpath_entry_count == 3
-    assert report.repeated_entry_count > 0
-
-
-def test_repeated_subtrees_are_not_expanded():
-    report = GradleDependencyReportParser().parse(
-        DIRECT_CONSUMER_OUTPUT
+    report = GradleDependencyReportCollector.parse_output(
+        output,
+        "runtimeClasspath",
     )
 
-    repeated_entries = [
-        entry
-        for entry in report.entries
-        if entry.is_repeated
-    ]
-
-    assert repeated_entries
-    assert all(entry.notation for entry in repeated_entries)
+    assert len(report.edges) == 1
+    assert report.edges[0].is_constraint is True
 
 
-def test_parser_handles_empty_output():
-    report = GradleDependencyReportParser().parse("")
+def test_parses_unresolved_dependency():
+    output = edge_line(
+        ":service",
+        "runtimeClasspath",
+        "project :service",
+        "com.example:missing:1.0",
+        "",
+        "false",
+        "UNRESOLVED",
+    )
 
-    assert report.selected_dependency is None
-    assert report.entries == ()
-    assert not report.is_selected_by_constraint
+    report = GradleDependencyReportCollector.parse_output(
+        output,
+        "runtimeClasspath",
+    )
+
+    assert len(report.edges) == 1
+    assert report.edges[0].selected is None
+    assert report.edges[0].status == "UNRESOLVED"
+
+
+def test_parses_project_configuration_error():
+    values = (
+        ":service",
+        "runtimeClasspath",
+        "IllegalStateException: resolution failed",
+    )
+    output = "SECURITY_AGENT_REPORT_ERROR\t" + "\t".join(
+        encode(value) for value in values
+    )
+
+    report = GradleDependencyReportCollector.parse_output(
+        output,
+        "runtimeClasspath",
+    )
+
+    assert report.edges == ()
+    assert report.errors == (
+        ":service (runtimeClasspath): "
+        "IllegalStateException: resolution failed",
+    )
+
+
+def test_ignores_malformed_records():
+    report = GradleDependencyReportCollector.parse_output(
+        "SECURITY_AGENT_EDGE\tinvalid",
+        "runtimeClasspath",
+    )
+
+    assert report.edges == ()
+    assert report.errors == ()
