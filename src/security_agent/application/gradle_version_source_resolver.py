@@ -1,7 +1,5 @@
-
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 from security_agent.domain.finding import SecurityFinding
 from security_agent.tools.repository import RepositoryTools
@@ -16,34 +14,69 @@ class VersionSourceEvidence:
     property_name: str | None
     value: str | None
     resolved: bool
+    lookup_scope: str | None = None
 
 
 class GradleVersionSourceResolver:
     """
-    Identifies the source of a directly declared Gradle dependency version.
+    Identifies how a directly declared Gradle dependency gets its version.
 
-    Supported:
-    - Inline versions in Maven coordinate notation.
-    - Kotlin DSL variables populated through
-      rootProject.findProperty("propertyName") as String.
-    - Properties defined in the repository-root gradle.properties.
-
-    Gradle remains authoritative for the resolved dependency version.
+    This is source-level evidence, not a replacement for Gradle's
+    resolved dependency graph.
     """
 
-    COORDINATE_PATTERN = re.compile(
-        r"""['"]([^'"]+)['"]"""
+    COORDINATE_PATTERN = re.compile(r"""['"]([^'"]+)['"]""")
+
+    PROPERTY_VARIABLE_PATTERNS = (
+        (
+            re.compile(
+                r"""
+                \b(?:val|var)\s+
+                (?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*
+                (?::\s*String\s*)?
+                \bby\s+project\b
+                """,
+                re.VERBOSE,
+            ),
+            "CURRENT_PROJECT",
+        ),
+        (
+            re.compile(
+                r"""
+                \b(?:val|var)\s+
+                (?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*
+                =
+                \s*rootProject\.findProperty\(
+                \s*['"](?P<property>[^'"]+)['"]\s*
+                \)
+                (?:\s*as\s+String)?
+                """,
+                re.VERBOSE,
+            ),
+            "ROOT_PROJECT",
+        ),
+        (
+            re.compile(
+                r"""
+                \b(?:val|var)\s+
+                (?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*
+                =
+                \s*project\.findProperty\(
+                \s*['"](?P<property>[^'"]+)['"]\s*
+                \)
+                (?:\s*as\s+String)?
+                """,
+                re.VERBOSE,
+            ),
+            "CURRENT_PROJECT",
+        ),
     )
 
-    PROPERTY_VARIABLE_PATTERN = re.compile(
+    FIND_PROPERTY_PATTERN = re.compile(
         r"""
-        \b(?:val|var)\s+
-        (?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*
-        =
-        \s*rootProject\.findProperty\(
+        \b(?:rootProject|project)\.findProperty\(
         \s*['"](?P<property>[^'"]+)['"]\s*
         \)
-        \s*as\s+String
         """,
         re.VERBOSE,
     )
@@ -62,7 +95,7 @@ class GradleVersionSourceResolver:
         content: str,
         finding: SecurityFinding,
     ) -> VersionSourceEvidence | None:
-        variable_properties = self._find_property_variables(content)
+        variables = self._find_property_variables(content)
 
         for match in self.COORDINATE_PATTERN.finditer(content):
             coordinate = match.group(1).strip()
@@ -77,7 +110,6 @@ class GradleVersionSourceResolver:
                 continue
 
             declaration = self._declaration_at(content, match.start())
-
             interpolation = self.INTERPOLATION_PATTERN.fullmatch(version)
 
             if interpolation is None:
@@ -91,34 +123,30 @@ class GradleVersionSourceResolver:
                     resolved=True,
                 )
 
-            variable = (
-                interpolation.group("braced")
-                or interpolation.group("plain")
-            )
+            variable = interpolation.group("braced") or interpolation.group("plain")
+            property_info = variables.get(variable)
 
-            property_name = variable_properties.get(variable)
-
-            if property_name is None:
+            if property_info is not None:
+                property_name, lookup_scope = property_info
                 return VersionSourceEvidence(
                     dependency=f"{group}:{artifact}",
                     declaration=declaration,
-                    source_type="UNKNOWN",
+                    source_type="GRADLE_PROJECT_PROPERTY",
                     source_file=None,
-                    property_name=None,
+                    property_name=property_name,
                     value=None,
                     resolved=False,
+                    lookup_scope=lookup_scope,
                 )
-
-            property_value = self._read_root_property(property_name)
 
             return VersionSourceEvidence(
                 dependency=f"{group}:{artifact}",
                 declaration=declaration,
-                source_type="GRADLE_PROPERTY",
-                source_file="gradle.properties",
-                property_name=property_name,
-                value=property_value,
-                resolved=property_value is not None,
+                source_type="UNKNOWN",
+                source_file=None,
+                property_name=None,
+                value=None,
+                resolved=False,
             )
 
         return None
@@ -127,36 +155,16 @@ class GradleVersionSourceResolver:
     def _find_property_variables(
         cls,
         content: str,
-    ) -> dict[str, str]:
-        return {
-            match.group("variable"): match.group("property")
-            for match in cls.PROPERTY_VARIABLE_PATTERN.finditer(content)
-        }
+    ) -> dict[str, tuple[str, str]]:
+        variables = {}
 
-    def _read_root_property(self, property_name: str) -> str | None:
-        try:
-            content = self.tools.read_file("gradle.properties")
-        except (FileNotFoundError, ValueError):
-            return None
+        for pattern, lookup_scope in cls.PROPERTY_VARIABLE_PATTERNS:
+            for match in pattern.finditer(content):
+                variable = match.group("variable")
+                property_name = match.groupdict().get("property") or variable
+                variables[variable] = (property_name, lookup_scope)
 
-        for line in content.splitlines():
-            stripped = line.strip()
-
-            if not stripped or stripped.startswith(("#", "!")):
-                continue
-
-            separator = re.search(r"[=:]", stripped)
-
-            if separator is None:
-                continue
-
-            key = stripped[:separator.start()].strip()
-            value = stripped[separator.end():].strip()
-
-            if key == property_name:
-                return value
-
-        return None
+        return variables
 
     @staticmethod
     def _matches_dependency(

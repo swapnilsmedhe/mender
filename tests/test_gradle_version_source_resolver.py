@@ -1,5 +1,3 @@
-
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -31,9 +29,7 @@ def finding():
 
 @pytest.fixture
 def tools():
-    repository = Mock()
-    repository.read_file.return_value = "jacksonVersion=2.23.0\n"
-    return repository
+    return Mock()
 
 
 @pytest.fixture
@@ -50,11 +46,7 @@ dependencies {
 }
 """
 
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
 
     assert evidence is not None
     assert evidence.source_type == "INLINE"
@@ -64,39 +56,59 @@ dependencies {
     tools.read_file.assert_not_called()
 
 
-def test_resolves_root_gradle_property(resolver, finding, tools):
-    content = """
-val jacksonVersion =
-    rootProject.findProperty("jacksonVersion") as String
+@pytest.mark.parametrize(
+    ("declaration", "expected_scope"),
+    [
+        (
+            'val jacksonVersion = rootProject.findProperty("jacksonVersion") as String',
+            "ROOT_PROJECT",
+        ),
+        (
+            'val jacksonVersion = project.findProperty("jacksonVersion") as String',
+            "CURRENT_PROJECT",
+        ),
+        (
+            "val jacksonVersion: String by project",
+            "CURRENT_PROJECT",
+        ),
+        (
+            "val jacksonVersion by project",
+            "CURRENT_PROJECT",
+        ),
+    ],
+)
+def test_identifies_gradle_property_lookup(
+    resolver,
+    finding,
+    declaration,
+    expected_scope,
+):
+    content = f"""
+{declaration}
 
-dependencies {
+dependencies {{
     implementation(
         "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
     )
-}
+}}
 """
 
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
 
     assert evidence is not None
-    assert evidence.source_type == "GRADLE_PROPERTY"
+    assert evidence.source_type == "GRADLE_PROJECT_PROPERTY"
     assert evidence.property_name == "jacksonVersion"
-    assert evidence.source_file == "gradle.properties"
-    assert evidence.value == "2.23.0"
-    assert evidence.resolved is True
+    assert evidence.lookup_scope == expected_scope
+
+    # The resolver does not claim to know Gradle's effective property value.
+    assert evidence.value is None
+    assert evidence.source_file is None
+    assert evidence.resolved is False
 
 
-def test_resolves_braced_property_interpolation(
-    resolver,
-    finding,
-):
+def test_supports_braced_property_interpolation(resolver, finding):
     content = """
-val jacksonVersion =
-    rootProject.findProperty("jacksonVersion") as String
+val jacksonVersion: String by project
 
 dependencies {
     implementation(
@@ -105,52 +117,14 @@ dependencies {
 }
 """
 
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
 
     assert evidence is not None
-    assert evidence.source_type == "GRADLE_PROPERTY"
     assert evidence.property_name == "jacksonVersion"
+    assert evidence.lookup_scope == "CURRENT_PROJECT"
 
 
-def test_returns_unknown_when_property_is_missing(
-    resolver,
-    finding,
-    tools,
-):
-    tools.read_file.return_value = "otherVersion=1.0.0\n"
-
-    content = """
-val jacksonVersion =
-    rootProject.findProperty("jacksonVersion") as String
-
-dependencies {
-    implementation(
-        "com.fasterxml.jackson.core:jackson-databind:$jacksonVersion"
-    )
-}
-"""
-
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
-
-    assert evidence is not None
-    assert evidence.source_type == "GRADLE_PROPERTY"
-    assert evidence.property_name == "jacksonVersion"
-    assert evidence.value is None
-    assert evidence.resolved is False
-
-
-def test_returns_unknown_for_unrecognised_variable(
-    resolver,
-    finding,
-):
+def test_returns_unknown_for_unrecognised_variable(resolver, finding):
     content = """
 dependencies {
     implementation(
@@ -159,11 +133,7 @@ dependencies {
 }
 """
 
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
 
     assert evidence is not None
     assert evidence.source_type == "UNKNOWN"
@@ -177,10 +147,33 @@ dependencies {
 }
 """
 
-    evidence = resolver.resolve(
-        "app/build.gradle.kts",
-        content,
-        finding,
-    )
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
 
     assert evidence is None
+
+
+def test_matches_artifact_only_finding(resolver, finding):
+    finding = SecurityFinding(
+        id=finding.id,
+        scanner=finding.scanner,
+        severity=finding.severity,
+        cve=finding.cve,
+        component="jackson-databind",
+        current_version=finding.current_version,
+        fixed_versions=finding.fixed_versions,
+        repository=finding.repository,
+        file=finding.file,
+    )
+
+    content = """
+dependencies {
+    implementation(
+        "com.fasterxml.jackson.core:jackson-databind:2.23.0"
+    )
+}
+"""
+
+    evidence = resolver.resolve("app/build.gradle.kts", content, finding)
+
+    assert evidence is not None
+    assert evidence.source_type == "INLINE"
