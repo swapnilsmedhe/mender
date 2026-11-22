@@ -1,4 +1,3 @@
-
 import base64
 import os
 import subprocess
@@ -25,6 +24,107 @@ class GradleDependencyReport:
     configuration: str
     edges: tuple[GradleDependencyEdge, ...] = ()
     errors: tuple[str, ...] = ()
+
+
+
+class GradleDependencyGraph:
+    """Find dependency paths within an individual Gradle project."""
+
+    def __init__(self, report: GradleDependencyReport) -> None:
+        self.report = report
+        self._adjacency: dict[tuple[str, str], list[str]] = {}
+
+        for edge in report.edges:
+            if (
+                edge.status != "RESOLVED"
+                or edge.is_constraint
+                or edge.selected is None
+            ):
+                continue
+
+            key = (edge.project_path, edge.from_component)
+            children = self._adjacency.setdefault(key, [])
+
+            if edge.selected not in children:
+                children.append(edge.selected)
+
+    def find_paths(
+        self,
+        project_path: str,
+        target_component: str,
+        max_paths: int = 100,
+    ) -> tuple[tuple[str, ...], ...]:
+        """Return paths from a project root to a target component."""
+        if not project_path.strip():
+            raise ValueError("Project path cannot be empty.")
+
+        if not target_component.strip():
+            raise ValueError("Target component cannot be empty.")
+
+        if max_paths < 1:
+            raise ValueError("max_paths must be at least 1.")
+
+        root = f"project {project_path}"
+        paths: list[tuple[str, ...]] = []
+
+        def visit(
+            current: str,
+            path: tuple[str, ...],
+            visited: frozenset[str],
+        ) -> None:
+            if len(paths) >= max_paths:
+                return
+
+            for child in self._adjacency.get(
+                (project_path, current),
+                (),
+            ):
+                if child in visited:
+                    continue
+
+                next_path = (*path, child)
+
+                if self._matches_component(child, target_component):
+                    paths.append(next_path)
+                    if len(paths) >= max_paths:
+                        return
+                    continue
+
+                visit(
+                    child,
+                    next_path,
+                    visited | {child},
+                )
+
+                if len(paths) >= max_paths:
+                    return
+
+        visit(root, (), frozenset({root}))
+        return tuple(paths)
+
+    @staticmethod
+    def _matches_component(
+        resolved_component: str,
+        target_component: str,
+    ) -> bool:
+        resolved_parts = resolved_component.split(":")
+        target_parts = target_component.split(":")
+
+        if len(target_parts) >= 2:
+            if len(resolved_parts) < 2:
+                return False
+
+            return (
+                resolved_parts[0].casefold()
+                == target_parts[-2].casefold()
+                and resolved_parts[1].casefold()
+                == target_parts[-1].casefold()
+            )
+
+        return (
+            resolved_parts[-1].casefold()
+            == target_component.casefold()
+        )
 
 
 class GradleDependencyReportCollector:
@@ -84,7 +184,6 @@ class GradleDependencyReportCollector:
                 ) from exc
 
         output = f"{result.stdout}\n{result.stderr}"
-
         report = self.parse_output(output, configuration)
 
         if result.returncode != 0:
@@ -277,4 +376,6 @@ gradle.projectsEvaluated {
 }
 """
 
+
+# Temporary compatibility with the existing RepositoryInspector import.
 GradleDependencyReportParser = GradleDependencyReportCollector

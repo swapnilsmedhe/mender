@@ -132,3 +132,277 @@ def test_ignores_malformed_records():
 
     assert report.edges == ()
     assert report.errors == ()
+
+
+
+from security_agent.application.gradle_dependency_report import (
+    GradleDependencyEdge,
+    GradleDependencyGraph,
+    GradleDependencyReport,
+)
+
+
+def create_edge(
+    project: str,
+    source: str,
+    selected: str,
+    *,
+    constraint: bool = False,
+    status: str = "RESOLVED",
+) -> GradleDependencyEdge:
+    return GradleDependencyEdge(
+        project_path=project,
+        configuration="runtimeClasspath",
+        from_component=source,
+        requested=selected,
+        selected=selected if status == "RESOLVED" else None,
+        is_constraint=constraint,
+        status=status,
+    )
+
+
+def test_finds_direct_dependency_path():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":service",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":service",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == (
+        ("com.fasterxml.jackson.core:jackson-databind:2.13.4",),
+    )
+
+
+def test_finds_transitive_dependency_path():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":integration",
+                "project :integration",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            ),
+            create_edge(
+                ":integration",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":integration",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == (
+        (
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
+    )
+
+
+def test_finds_multiple_paths_to_same_dependency():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":app",
+                "project :app",
+                "project :service",
+            ),
+            create_edge(
+                ":app",
+                "project :app",
+                "project :integration",
+            ),
+            create_edge(
+                ":app",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+            create_edge(
+                ":app",
+                "project :integration",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            ),
+            create_edge(
+                ":app",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    paths = graph.find_paths(
+        ":app",
+        "com.fasterxml.jackson.core:jackson-databind",
+    )
+
+    assert paths == (
+        (
+            "project :service",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
+        (
+            "project :integration",
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
+    )
+
+
+def test_ignores_constraint_edges_when_finding_paths():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":bom-consumer",
+                "project :bom-consumer",
+                "com.fasterxml.jackson:jackson-bom:2.13.4",
+            ),
+            create_edge(
+                ":bom-consumer",
+                "com.fasterxml.jackson:jackson-bom:2.13.4",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+                constraint=True,
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":bom-consumer",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == ()
+
+
+def test_ignores_unresolved_edges():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":service",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+                status="UNRESOLVED",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":service",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == ()
+
+
+def test_does_not_mix_edges_from_different_projects():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":service",
+                "project :service",
+                "com.example:library:1.0",
+            ),
+            create_edge(
+                ":other",
+                "com.example:library:1.0",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":service",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == ()
+
+
+def test_avoids_cycles():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(
+                ":app",
+                "project :app",
+                "com.example:a:1.0",
+            ),
+            create_edge(
+                ":app",
+                "com.example:a:1.0",
+                "com.example:b:1.0",
+            ),
+            create_edge(
+                ":app",
+                "com.example:b:1.0",
+                "com.example:a:1.0",
+            ),
+            create_edge(
+                ":app",
+                "com.example:b:1.0",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    assert graph.find_paths(
+        ":app",
+        "com.fasterxml.jackson.core:jackson-databind",
+    ) == (
+        (
+            "com.example:a:1.0",
+            "com.example:b:1.0",
+            "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+        ),
+    )
+
+
+def test_respects_maximum_path_count():
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_edge(":app", "project :app", "com.example:a:1.0"),
+            create_edge(":app", "project :app", "com.example:b:1.0"),
+            create_edge(
+                ":app",
+                "com.example:a:1.0",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+            create_edge(
+                ":app",
+                "com.example:b:1.0",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.4",
+            ),
+        ),
+    )
+
+    graph = GradleDependencyGraph(report)
+
+    paths = graph.find_paths(
+        ":app",
+        "com.fasterxml.jackson.core:jackson-databind",
+        max_paths=1,
+    )
+
+    assert len(paths) == 1
