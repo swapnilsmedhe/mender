@@ -12,14 +12,12 @@ from security_agent.domain.finding import SecurityFinding
 
 class AIRecommendationContextBuilder:
     def build(
-            self,
-            finding: SecurityFinding,
-            inspection: RepositoryInspection,
+        self,
+        finding: SecurityFinding,
+        inspection: RepositoryInspection,
     ) -> AIRecommendationContext:
         if inspection.finding_id != finding.id:
-            raise ValueError(
-                "Finding and repository inspection IDs do not match."
-            )
+            raise ValueError("Finding and repository inspection IDs do not match.")
 
         total_paths = sum(
             len(match.dependency_paths)
@@ -83,10 +81,7 @@ class AIRecommendationContextBuilder:
         included = []
 
         for location in candidates:
-            if (
-                    len(included)
-                    >= AIRecommendationContext.MAX_LOCATIONS
-            ):
+            if len(included) >= AIRecommendationContext.MAX_LOCATIONS:
                 omitted_count += 1
                 continue
 
@@ -136,20 +131,47 @@ class AIRecommendationContextBuilder:
 
     @staticmethod
     def _to_location(
-            match,
-            relationship: DependencyRelationship,
-            dependency_path: tuple[str, ...],
+        match,
+        relationship: DependencyRelationship,
+        dependency_path: tuple[str, ...],
     ) -> DependencyLocation:
+        version_source = (
+            match.version_source
+            if relationship == DependencyRelationship.DIRECT
+            else None
+        )
+
         return DependencyLocation(
             module_path=str(match.project_path),
             manifest_file=str(match.build_file),
             relationship=relationship,
             dependency_path=dependency_path,
+            declaration=(
+                version_source.declaration if version_source is not None else None
+            ),
+            version_source_type=(
+                version_source.source_type if version_source is not None else None
+            ),
+            version_property_name=(
+                version_source.property_name if version_source is not None else None
+            ),
+            version_lookup_scope=(
+                version_source.lookup_scope if version_source is not None else None
+            ),
+            version_source_file=(
+                version_source.source_file if version_source is not None else None
+            ),
+            declared_version=(
+                version_source.value if version_source is not None else None
+            ),
+            version_source_resolved=(
+                version_source.resolved if version_source is not None else None
+            ),
         )
 
     @staticmethod
     def _deduplicate(
-            locations: list[DependencyLocation],
+        locations: list[DependencyLocation],
     ) -> list[DependencyLocation]:
         unique = []
         seen = set()
@@ -160,6 +182,13 @@ class AIRecommendationContextBuilder:
                 location.manifest_file,
                 location.relationship,
                 location.dependency_path,
+                location.declaration,
+                location.version_source_type,
+                location.version_property_name,
+                location.version_lookup_scope,
+                location.version_source_file,
+                location.declared_version,
+                location.version_source_resolved,
             )
 
             if key not in seen:
@@ -170,10 +199,10 @@ class AIRecommendationContextBuilder:
 
     @staticmethod
     def _create_context(
-            finding: SecurityFinding,
-            inspection: RepositoryInspection,
-            locations: tuple[DependencyLocation, ...],
-            facts: tuple[ContextFact, ...],
+        finding: SecurityFinding,
+        inspection: RepositoryInspection,
+        locations: tuple[DependencyLocation, ...],
+        facts: tuple[ContextFact, ...],
     ) -> AIRecommendationContext:
         return AIRecommendationContext(
             finding_id=finding.id,

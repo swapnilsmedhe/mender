@@ -38,6 +38,12 @@ class DependencyLocation:
     lock_file: str | None = None
     dependency_path: tuple[str, ...] = ()
     declaration: str | None = None
+    version_source_type: str | None = None
+    version_property_name: str | None = None
+    version_lookup_scope: str | None = None
+    version_source_file: str | None = None
+    declared_version: str | None = None
+    version_source_resolved: bool | None = None
 
     MAX_PATH_ENTRIES: ClassVar[int] = 10
     MAX_FIELD_LENGTH: ClassVar[int] = 500
@@ -77,11 +83,44 @@ class DependencyLocation:
                 raise ValueError("Dependency path entry is too long.")
 
         if self.declaration is not None:
-            if not self.declaration.strip():
-                raise ValueError("Dependency declaration cannot be empty.")
+            self._validate_optional_text(
+                self.declaration,
+                "Dependency declaration",
+                self.MAX_DECLARATION_LENGTH,
+            )
 
-            if len(self.declaration) > self.MAX_DECLARATION_LENGTH:
-                raise ValueError("Dependency declaration is too long.")
+        optional_fields = (
+            ("Version source type", self.version_source_type),
+            ("Version property name", self.version_property_name),
+            ("Version lookup scope", self.version_lookup_scope),
+            ("Version source file", self.version_source_file),
+            ("Declared version", self.declared_version),
+        )
+
+        for label, value in optional_fields:
+            if value is not None:
+                self._validate_optional_text(
+                    value,
+                    label,
+                    self.MAX_FIELD_LENGTH,
+                )
+
+        if self.version_source_resolved is not None and not isinstance(
+            self.version_source_resolved, bool
+        ):
+            raise ValueError("Version source resolved flag must be a boolean.")
+
+    @staticmethod
+    def _validate_optional_text(
+        value: str,
+        label: str,
+        max_length: int,
+    ) -> None:
+        if not value.strip():
+            raise ValueError(f"{label} cannot be empty.")
+
+        if len(value) > max_length:
+            raise ValueError(f"{label} is too long.")
 
 
 @dataclass(frozen=True)
@@ -118,15 +157,11 @@ class AIRecommendationContext:
             raise ValueError("Too many context facts.")
 
         if not all(
-                isinstance(location, DependencyLocation)
-                for location in self.locations
+            isinstance(location, DependencyLocation) for location in self.locations
         ):
             raise ValueError("Invalid dependency location.")
 
-        if not all(
-                isinstance(fact, ContextFact)
-                for fact in self.facts
-        ):
+        if not all(isinstance(fact, ContextFact) for fact in self.facts):
             raise ValueError("Invalid context fact.")
 
         if self.estimated_characters > self.MAX_CONTEXT_CHARACTERS:
@@ -135,9 +170,9 @@ class AIRecommendationContext:
     @property
     def estimated_characters(self) -> int:
         total = (
-                len(self.finding_id)
-                + len(self.dependency_name)
-                + len(self.resolved_version)
+            len(self.finding_id)
+            + len(self.dependency_name)
+            + len(self.resolved_version)
         )
 
         if self.dependency_scope:
@@ -154,6 +189,16 @@ class AIRecommendationContext:
                 total += len(location.declaration)
 
             total += sum(len(entry) for entry in location.dependency_path)
+
+            optional_values = (
+                location.version_source_type,
+                location.version_property_name,
+                location.version_lookup_scope,
+                location.version_source_file,
+                location.declared_version,
+            )
+
+            total += sum(len(value) for value in optional_values if value is not None)
 
         for fact in self.facts:
             total += len(fact.key)

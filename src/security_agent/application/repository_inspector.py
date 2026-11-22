@@ -1,18 +1,24 @@
+
 import os
 import re
 import subprocess
 from dataclasses import dataclass
 
+from security_agent.application.gradle_dependency_report import (
+    GradleDependencyGraph,
+    GradleDependencyReportCollector,
+)
+from security_agent.application.gradle_version_source_resolver import (
+    GradleVersionSourceResolver,
+    VersionSourceEvidence,
+)
 from security_agent.application.module_discovery import (
     GradleModule,
     GradleModuleDiscovery,
 )
 from security_agent.domain.finding import SecurityFinding
 from security_agent.tools.repository import RepositoryTools
-from security_agent.application.gradle_dependency_report import (
-    GradleDependencyGraph,
-    GradleDependencyReportCollector,
-)
+
 
 @dataclass(frozen=True)
 class ModuleMatch:
@@ -21,6 +27,7 @@ class ModuleMatch:
     command_output: str
     resolved_version: str | None = None
     dependency_paths: tuple[tuple[str, ...], ...] = ()
+    version_source: VersionSourceEvidence | None = None
 
     @property
     def dependency_path(self) -> tuple[str, ...]:
@@ -90,9 +97,7 @@ class RepositoryInspector:
         r"(?:\s+->\s+(?P<selected>[^\s()]+))?"
     )
 
-    TREE_MARKER_PATTERN = re.compile(
-        r"(?:\+---|\\---)\s+"
-    )
+    TREE_MARKER_PATTERN = re.compile(r"(?:\+---|\\---)\s+")
 
     def __init__(
         self,
@@ -113,7 +118,13 @@ class RepositoryInspector:
             tools,
             timeout_seconds=timeout_seconds,
         )
-    
+
+        self.version_source_resolver = (
+            GradleVersionSourceResolver(tools)
+            if tools is not None
+            else None
+        )
+
     def inspect(
         self,
         finding: SecurityFinding,
@@ -159,15 +170,13 @@ class RepositoryInspector:
                 command_output="\n".join(outputs),
                 is_consistent=False,
                 errors=(
-                    f"No Gradle projects expose the requested "
-                    f"configuration '{self.configuration}'.",
+                    (f"No Gradle projects expose the requested "
+                    f"configuration '{self.configuration}'."),
                 ),
             )
 
         try:
-            report = self.report_collector.collect(
-                self.configuration,
-            )
+            report = self.report_collector.collect(self.configuration)
         except (RuntimeError, FileNotFoundError, ValueError) as exc:
             return RepositoryInspection(
                 finding_id=finding.id,
@@ -214,7 +223,17 @@ class RepositoryInspector:
 
             def create_match(
                 dependency_paths: tuple[tuple[str, ...], ...],
+                *,
+                is_direct: bool,
             ) -> ModuleMatch:
+                version_source = None
+
+                if is_direct:
+                    version_source = self._resolve_version_source(
+                        module.build_file,
+                        finding,
+                    )
+
                 return ModuleMatch(
                     project_path=module.project_path,
                     build_file=module.build_file,
@@ -224,18 +243,19 @@ class RepositoryInspector:
                     ),
                     resolved_version=finding.current_version,
                     dependency_paths=dependency_paths,
+                    version_source=version_source,
                 )
 
             # A module can have both direct and transitive paths.
             # Keep those relationships separate.
             if direct_paths:
                 direct_matches.append(
-                    create_match(direct_paths)
+                    create_match(direct_paths, is_direct=True)
                 )
 
             if transitive_paths:
                 transitive_matches.append(
-                    create_match(transitive_paths)
+                    create_match(transitive_paths, is_direct=False)
                 )
 
             outputs.append(
@@ -254,18 +274,36 @@ class RepositoryInspector:
             finding_id=finding.id,
             configuration=self.configuration,
             command_output="\n\n".join(outputs),
-            is_consistent=(
-                has_dependency_evidence and not errors
-            ),
+            is_consistent=has_dependency_evidence and not errors,
             matches=tuple(direct_matches),
             errors=tuple(errors),
             transitive_matches=tuple(transitive_matches),
         )
 
+    def _resolve_version_source(
+        self,
+        build_file: str,
+        finding: SecurityFinding,
+    ) -> VersionSourceEvidence | None:
+        if self.tools is None or self.version_source_resolver is None:
+            return None
+
+        try:
+            content = self.tools.read_file(build_file)
+        except (FileNotFoundError, OSError, UnicodeError, ValueError):
+            # Source-level evidence is supplementary. Failure to read
+            # a build file must not invalidate Gradle graph inspection.
+            return None
+
+        return self.version_source_resolver.resolve(
+            build_file=build_file,
+            content=content,
+            finding=finding,
+        )
 
     @staticmethod
     def _path_resolved_version(
-            dependency_path: tuple[str, ...],
+        dependency_path: tuple[str, ...],
     ) -> str | None:
         if not dependency_path:
             return None
@@ -279,9 +317,9 @@ class RepositoryInspector:
         return parts[-1]
 
     def _inspect_module(
-            self,
-            module: GradleModule,
-            finding: SecurityFinding,
+        self,
+        module: GradleModule,
+        finding: SecurityFinding,
     ) -> str:
         root = self.tools.root
 
@@ -321,9 +359,7 @@ class RepositoryInspector:
                 "Gradle dependency inspection timed out."
             ) from exc
 
-        output = (
-            f"{result.stdout}\n{result.stderr}"
-        ).strip()
+        output = f"{result.stdout}\n{result.stderr}".strip()
 
         if result.returncode != 0:
             raise RuntimeError(
@@ -335,8 +371,8 @@ class RepositoryInspector:
 
     @classmethod
     def _parse_coordinates(
-            cls,
-            output: str,
+        cls,
+        output: str,
     ) -> list[_DependencyCoordinate]:
         coordinates = []
 
@@ -358,8 +394,8 @@ class RepositoryInspector:
 
     @staticmethod
     def _matches_component(
-            coordinate: _DependencyCoordinate,
-            finding: SecurityFinding,
+        coordinate: _DependencyCoordinate,
+        finding: SecurityFinding,
     ) -> bool:
         parts = finding.component.split(":")
 
@@ -368,22 +404,18 @@ class RepositoryInspector:
             expected_artifact = parts[-1]
 
             return (
-                    coordinate.group.casefold()
-                    == expected_group.casefold()
-                    and coordinate.artifact.casefold()
-                    == expected_artifact.casefold()
+                coordinate.group.casefold() == expected_group.casefold()
+                and coordinate.artifact.casefold()
+                == expected_artifact.casefold()
             )
 
-        return (
-                coordinate.artifact.casefold()
-                == finding.component.casefold()
-        )
+        return coordinate.artifact.casefold() == finding.component.casefold()
 
     @classmethod
     def _contains_finding(
-            cls,
-            output: str,
-            finding: SecurityFinding,
+        cls,
+        output: str,
+        finding: SecurityFinding,
     ) -> bool:
         coordinates = [
             coordinate
@@ -393,23 +425,22 @@ class RepositoryInspector:
 
         if coordinates:
             return any(
-                coordinate.resolved_version
-                == finding.current_version
+                coordinate.resolved_version == finding.current_version
                 for coordinate in coordinates
             )
 
         # Compatibility with simplified output that contains the
         # component and version but no complete Maven coordinates.
         return (
-                finding.component.casefold() in output.casefold()
-                and finding.current_version in output
+            finding.component.casefold() in output.casefold()
+            and finding.current_version in output
         )
 
     @classmethod
     def _extract_resolved_version(
-            cls,
-            output: str,
-            finding: SecurityFinding,
+        cls,
+        output: str,
+        finding: SecurityFinding,
     ) -> str | None:
         coordinates = [
             coordinate
@@ -425,8 +456,8 @@ class RepositoryInspector:
             return coordinates[0].resolved_version
 
         if (
-                finding.component.casefold() in output.casefold()
-                and finding.current_version in output
+            finding.component.casefold() in output.casefold()
+            and finding.current_version in output
         ):
             return finding.current_version
 
@@ -434,8 +465,8 @@ class RepositoryInspector:
 
     @classmethod
     def _iter_dependency_tree_nodes(
-            cls,
-            output: str,
+        cls,
+        output: str,
     ) -> list[_DependencyTreeNode]:
         nodes = []
 
@@ -502,9 +533,9 @@ class RepositoryInspector:
 
     @classmethod
     def _extract_dependency_paths(
-            cls,
-            output: str,
-            finding: SecurityFinding,
+        cls,
+        output: str,
+        finding: SecurityFinding,
     ) -> tuple[tuple[str, ...], ...]:
         nodes = cls._iter_dependency_tree_nodes(output)
 
@@ -562,9 +593,9 @@ class RepositoryInspector:
 
     @classmethod
     def _contains_direct_dependency(
-            cls,
-            content: str,
-            finding: SecurityFinding,
+        cls,
+        content: str,
+        finding: SecurityFinding,
     ) -> bool:
         configurations = "|".join(
             re.escape(item)
@@ -620,8 +651,8 @@ class RepositoryInspector:
 
     @staticmethod
     def _version_matches(
-            version: str,
-            finding: SecurityFinding,
+        version: str,
+        finding: SecurityFinding,
     ) -> bool:
         if version == finding.current_version:
             return True
@@ -637,9 +668,9 @@ class RepositoryInspector:
 
     @classmethod
     def _matches_string_notation(
-            cls,
-            declaration: str,
-            finding: SecurityFinding,
+        cls,
+        declaration: str,
+        finding: SecurityFinding,
     ) -> bool:
         coordinates = re.findall(
             r"""['"]([^'"]+)['"]""",
@@ -655,13 +686,13 @@ class RepositoryInspector:
             group, artifact, version = parts
 
             if not cls._matches_component(
-                    _DependencyCoordinate(
-                        group=group,
-                        artifact=artifact,
-                        requested_version=version,
-                        resolved_version=version,
-                    ),
-                    finding,
+                _DependencyCoordinate(
+                    group=group,
+                    artifact=artifact,
+                    requested_version=version,
+                    resolved_version=version,
+                ),
+                finding,
             ):
                 continue
 
@@ -672,9 +703,9 @@ class RepositoryInspector:
 
     @classmethod
     def _matches_map_notation(
-            cls,
-            declaration: str,
-            finding: SecurityFinding,
+        cls,
+        declaration: str,
+        finding: SecurityFinding,
     ) -> bool:
         group_match = re.search(
             r"""group\s*:\s*['"]([^'"]+)['"]""",

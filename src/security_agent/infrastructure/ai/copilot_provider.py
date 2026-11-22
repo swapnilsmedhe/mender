@@ -8,14 +8,12 @@ from security_agent.domain.ai_recommendation import (
     AIRecommendation,
     AIRecommendationResult,
     RecommendationRisk,
+    RecommendationType,
 )
 from security_agent.domain.ai_recommendation_context import (
     AIRecommendationContext,
 )
 from security_agent.domain.analysis import Confidence
-from security_agent.domain.ai_recommendation import (
-    RecommendationType,
-)
 from security_agent.domain.finding import SecurityFinding
 
 
@@ -29,17 +27,17 @@ class CopilotRecommendationProvider:
     """
 
     def __init__(
-            self,
-            model: str = "auto",
-            timeout_seconds: float = 120,
+        self,
+        model: str = "auto",
+        timeout_seconds: float = 120,
     ) -> None:
         self.model = model
         self.timeout_seconds = timeout_seconds
 
     def recommend(
-            self,
-            finding: SecurityFinding,
-            context: AIRecommendationContext,
+        self,
+        finding: SecurityFinding,
+        context: AIRecommendationContext,
     ) -> AIRecommendationResult:
         if finding.id != context.finding_id:
             raise ValueError(
@@ -104,12 +102,24 @@ class CopilotRecommendationProvider:
 
     @staticmethod
     def _build_prompt(
-            finding: SecurityFinding,
-            context: AIRecommendationContext,
+        finding: SecurityFinding,
+        context: AIRecommendationContext,
     ) -> str:
         locations = []
 
         for location in context.locations:
+            version_source = None
+
+            if location.version_source_type is not None:
+                version_source = {
+                    "source_type": location.version_source_type,
+                    "property_name": location.version_property_name,
+                    "lookup_scope": location.version_lookup_scope,
+                    "source_file": location.version_source_file,
+                    "declared_version": location.declared_version,
+                    "resolved": location.version_source_resolved,
+                }
+
             locations.append({
                 "module": location.module_path,
                 "manifest": location.manifest_file,
@@ -117,6 +127,7 @@ class CopilotRecommendationProvider:
                 "dependency_path": list(location.dependency_path),
                 "lock_file": location.lock_file,
                 "declaration": location.declaration,
+                "version_source": version_source,
             })
 
         facts = {
@@ -159,6 +170,18 @@ SECURITY RULES:
   and recommend a parent dependency or BOM upgrade only when there
   is sufficient evidence.
 - Do not assume a direct dependency override is safe.
+- Treat version_source as source-level evidence, not proof of
+  Gradle's final resolved value.
+- If version_source.resolved is false, the declared version value
+  is not known from the supplied evidence. Do not invent or infer it.
+- For GRADLE_PROJECT_PROPERTY, use the property name and lookup scope
+  as clues only. Do not assume which gradle.properties file or
+  environment source provides its effective value.
+- Do not assume a BOM controls a dependency unless the supplied
+  evidence explicitly establishes that relationship.
+- Do not assume a dependency declaration is the only version source;
+  Gradle constraints, platforms, catalogs, plugins, and resolution
+  rules may also influence the selected version.
 - If evidence is insufficient, recommend MANUAL_REMEDIATION.
 - Do not claim that a recommendation has been tested.
 - Do not propose arbitrary shell commands or file modifications.
@@ -256,9 +279,9 @@ Evidence:
         return payload
 
     def _to_result(
-            self,
-            finding: SecurityFinding,
-            payload: dict[str, Any],
+        self,
+        finding: SecurityFinding,
+        payload: dict[str, Any],
     ) -> AIRecommendationResult:
         recommendations = []
 
