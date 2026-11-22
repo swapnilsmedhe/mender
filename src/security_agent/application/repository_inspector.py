@@ -1,4 +1,3 @@
-
 import os
 import re
 import subprocess
@@ -106,9 +105,10 @@ class RepositoryInspector:
             timeout_seconds=timeout_seconds,
         )
 
+    
     def inspect(
-            self,
-            finding: SecurityFinding,
+        self,
+        finding: SecurityFinding,
     ) -> RepositoryInspection:
         modules = self.discovery.discover()
 
@@ -135,7 +135,25 @@ class RepositoryInspector:
                 errors=tuple(errors),
             )
 
+        inspected_module_count = 0
+
         for module in modules_with_build_files:
+            # None means configuration information was not supplied
+            # by an older discovery result. In that case, preserve
+            # the previous behavior and attempt the inspection.
+            if (
+                module.configurations is not None
+                and self.configuration not in module.configurations
+            ):
+                outputs.append(
+                    f"Module {module.project_path} skipped: "
+                    f"configuration '{self.configuration}' "
+                    "is not available."
+                )
+                continue
+
+            inspected_module_count += 1
+
             try:
                 output = self._inspect_module(module, finding)
 
@@ -181,17 +199,28 @@ class RepositoryInspector:
             except RuntimeError as exc:
                 errors.append(f"{module.project_path}: {exc}")
 
+        if inspected_module_count == 0:
+            errors.append(
+                f"No Gradle projects expose the requested "
+                f"configuration '{self.configuration}'."
+            )
+
+        has_dependency_evidence = bool(
+            direct_matches or transitive_matches
+        )
+
         return RepositoryInspection(
             finding_id=finding.id,
             configuration=self.configuration,
             command_output="\n\n".join(outputs),
             is_consistent=(
-                    len(direct_matches) == 1 and not errors
+                has_dependency_evidence and not errors
             ),
             matches=tuple(direct_matches),
             errors=tuple(errors),
             transitive_matches=tuple(transitive_matches),
         )
+
 
     def _inspect_module(
             self,

@@ -184,3 +184,43 @@ def test_discovery_rejects_project_outside_repository(
                 match="outside repository",
         ):
             discovery.discover()
+
+
+def test_parses_project_configurations(discovery, tmp_path):
+    output = "\t".join([
+        "SECURITY_AGENT_PROJECT",
+        encode(":service"),
+        encode(str(tmp_path)),
+        encode(str(tmp_path / "build.gradle")),
+        encode("compileClasspath,runtimeClasspath,testRuntimeClasspath"),
+    ])
+
+    modules = discovery._parse_output(output, tmp_path)
+
+    assert len(modules) == 1
+    assert modules[0].configurations == (
+        "compileClasspath",
+        "runtimeClasspath",
+        "testRuntimeClasspath",
+    )
+
+
+def test_parses_project_without_runtime_classpath(
+    discovery,
+    tmp_path,
+):
+    output = "\t".join([
+        "SECURITY_AGENT_PROJECT",
+        encode(":"),
+        encode(str(tmp_path)),
+        encode(str(tmp_path / "build.gradle")),
+        encode("archives,default"),
+    ])
+
+    modules = discovery._parse_output(output, tmp_path)
+
+    assert len(modules) == 1
+    assert modules[0].configurations == (
+        "archives",
+        "default",
+    )

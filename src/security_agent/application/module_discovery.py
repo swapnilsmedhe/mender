@@ -1,4 +1,3 @@
-
 import base64
 import os
 import subprocess
@@ -15,15 +14,16 @@ class GradleModule:
     project_path: str
     directory: str
     build_file: str | None
+    configurations: tuple[str, ...] | None = None
 
 
 class GradleModuleDiscovery:
     MARKER = "SECURITY_AGENT_PROJECT"
 
     def __init__(
-            self,
-            tools: RepositoryTools,
-            timeout_seconds: int = 120,
+        self,
+        tools: RepositoryTools,
+        timeout_seconds: int = 120,
     ) -> None:
         self.tools = tools
         self.timeout_seconds = timeout_seconds
@@ -101,20 +101,27 @@ def encodeValue = { value ->
 
 gradle.projectsEvaluated {
     gradle.rootProject.allprojects.each { project ->
+        def configurations = project.configurations
+            .names
+            .toList()
+            .sort()
+            .join(",")
+
         println(
             "SECURITY_AGENT_PROJECT\t" +
             encodeValue(project.path) + "\t" +
             encodeValue(project.projectDir.canonicalPath) + "\t" +
-            encodeValue(project.buildFile.canonicalPath)
+            encodeValue(project.buildFile.canonicalPath) + "\t" +
+            encodeValue(configurations)
         )
     }
 }
 """
 
     def _parse_output(
-            self,
-            output: str,
-            root: Path,
+        self,
+        output: str,
+        root: Path,
     ) -> list[GradleModule]:
         modules = []
         root = root.resolve()
@@ -125,7 +132,7 @@ gradle.projectsEvaluated {
 
             parts = line.split("\t")
 
-            if len(parts) != 4:
+            if len(parts) not in (4, 5):
                 continue
 
             try:
@@ -136,6 +143,18 @@ gradle.projectsEvaluated {
                 build_file_path = Path(
                     self._decode(parts[3])
                 ).resolve()
+
+                configurations = None
+
+                if len(parts) == 5:
+                    encoded_configurations = self._decode(parts[4])
+                    configurations = (
+                        tuple(
+                            item
+                            for item in encoded_configurations.split(",")
+                            if item
+                        )
+                    )
 
             except (ValueError, OSError):
                 continue
@@ -156,8 +175,6 @@ gradle.projectsEvaluated {
                 directory.relative_to(root).as_posix()
             )
 
-            # A Gradle project can exist without its own build file.
-            # Preserve that project instead of failing discovery.
             relative_build_file = None
 
             if build_file_path.is_file():
@@ -173,10 +190,10 @@ gradle.projectsEvaluated {
                     project_path=project_path,
                     directory=relative_directory,
                     build_file=relative_build_file,
+                    configurations=configurations,
                 )
             )
 
-        # Avoid duplicate project entries.
         unique_modules = {
             module.project_path: module
             for module in modules

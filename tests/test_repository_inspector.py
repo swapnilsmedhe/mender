@@ -235,3 +235,37 @@ class TestModuleMatchStructuredInformation:
 
         assert match.resolved_version is None
         assert match.dependency_paths == ()
+
+    
+def test_multiple_direct_matches_are_consistent_when_no_errors(
+    finding,
+):
+    from security_agent.application.repository_inspector import (
+        RepositoryInspection,
+    )
+
+    match_one = ModuleMatch(
+        project_path=":service",
+        build_file="service/build.gradle.kts",
+        command_output="Jackson 2.15.2",
+        resolved_version="2.15.2",
+    )
+
+    match_two = ModuleMatch(
+        project_path=":direct-consumer",
+        build_file="direct-consumer/build.gradle.kts",
+        command_output="Jackson 2.15.2",
+        resolved_version="2.15.2",
+    )
+
+    inspection = RepositoryInspection(
+        finding_id=finding.id,
+        configuration="runtimeClasspath",
+        command_output="Gradle output",
+        is_consistent=True,
+        matches=(match_one, match_two),
+    )
+
+    assert inspection.is_consistent
+    assert len(inspection.matches) == 2
+    assert not inspection.errors
