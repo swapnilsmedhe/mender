@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import re
@@ -40,9 +39,7 @@ class CopilotRecommendationProvider:
         context: AIRecommendationContext,
     ) -> AIRecommendationResult:
         if finding.id != context.finding_id:
-            raise ValueError(
-                "Finding and recommendation context IDs do not match."
-            )
+            raise ValueError("Finding and recommendation context IDs do not match.")
 
         prompt = self._build_prompt(finding, context)
         response = self._run_prompt(prompt)
@@ -56,8 +53,7 @@ class CopilotRecommendationProvider:
         except RuntimeError as exc:
             if "asyncio.run()" in str(exc):
                 raise RuntimeError(
-                    "Copilot provider cannot run inside an active "
-                    "asyncio event loop."
+                    "Copilot provider cannot run inside an active asyncio event loop."
                 ) from exc
             raise
 
@@ -66,8 +62,7 @@ class CopilotRecommendationProvider:
             from copilot import CopilotClient
         except ImportError as exc:
             raise RuntimeError(
-                "GitHub Copilot SDK is not installed. "
-                "Run 'uv sync' to install it."
+                "GitHub Copilot SDK is not installed. Run 'uv sync' to install it."
             ) from exc
 
         try:
@@ -82,23 +77,17 @@ class CopilotRecommendationProvider:
                     )
 
             if response is None or response.data is None:
-                raise RuntimeError(
-                    "GitHub Copilot returned an empty response."
-                )
+                raise RuntimeError("GitHub Copilot returned an empty response.")
 
             content = response.data.content
 
             if not isinstance(content, str) or not content.strip():
-                raise RuntimeError(
-                    "GitHub Copilot returned an empty response."
-                )
+                raise RuntimeError("GitHub Copilot returned an empty response.")
 
             return content
 
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
-                "GitHub Copilot request timed out."
-            ) from exc
+            raise RuntimeError("GitHub Copilot request timed out.") from exc
 
     @staticmethod
     def _build_prompt(
@@ -118,22 +107,23 @@ class CopilotRecommendationProvider:
                     "source_file": location.version_source_file,
                     "declared_version": location.declared_version,
                     "resolved": location.version_source_resolved,
+                    "candidate_source_file": (location.version_candidate_source_file),
+                    "candidate_value": location.version_candidate_value,
                 }
 
-            locations.append({
-                "module": location.module_path,
-                "manifest": location.manifest_file,
-                "relationship": location.relationship.value,
-                "dependency_path": list(location.dependency_path),
-                "lock_file": location.lock_file,
-                "declaration": location.declaration,
-                "version_source": version_source,
-            })
+            locations.append(
+                {
+                    "module": location.module_path,
+                    "manifest": location.manifest_file,
+                    "relationship": location.relationship.value,
+                    "dependency_path": list(location.dependency_path),
+                    "lock_file": location.lock_file,
+                    "declaration": location.declaration,
+                    "version_source": version_source,
+                }
+            )
 
-        facts = {
-            fact.key: fact.value
-            for fact in context.facts
-        }
+        facts = {fact.key: fact.value for fact in context.facts}
 
         evidence = {
             "finding": {
@@ -177,6 +167,11 @@ SECURITY RULES:
 - For GRADLE_PROJECT_PROPERTY, use the property name and lookup scope
   as clues only. Do not assume which gradle.properties file or
   environment source provides its effective value.
+- candidate_value is only a value found in a repository file.
+  It is not proof of Gradle's effective property value.
+- candidate_source_file identifies where that candidate was found.
+  Do not treat it as proof that Gradle actually uses that file.
+- Do not claim that a candidate value is the resolved dependency version.
 - Do not assume a BOM controls a dependency unless the supplied
   evidence explicitly establishes that relationship.
 - Do not assume a dependency declaration is the only version source;
@@ -237,8 +232,6 @@ Evidence:
     def _parse_response(content: str) -> dict[str, Any]:
         content = content.strip()
 
-        # Tolerate a JSON code fence, but do not accept arbitrary
-        # explanatory text around the JSON response.
         if content.startswith("```"):
             content = re.sub(
                 r"^```(?:json)?\s*",
@@ -257,24 +250,16 @@ Evidence:
         try:
             payload = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Copilot returned invalid JSON."
-            ) from exc
+            raise ValueError("Copilot returned invalid JSON.") from exc
 
         if not isinstance(payload, dict):
-            raise ValueError(
-                "Copilot response must be a JSON object."
-            )
+            raise ValueError("Copilot response must be a JSON object.")
 
         if not isinstance(payload.get("summary"), str):
-            raise ValueError(
-                "Copilot response must contain a summary."
-            )
+            raise ValueError("Copilot response must contain a summary.")
 
         if not isinstance(payload.get("recommendations"), list):
-            raise ValueError(
-                "Copilot response must contain a recommendations array."
-            )
+            raise ValueError("Copilot response must contain a recommendations array.")
 
         return payload
 
@@ -287,9 +272,7 @@ Evidence:
 
         for item in payload["recommendations"]:
             if not isinstance(item, dict):
-                raise ValueError(
-                    "Each recommendation must be a JSON object."
-                )
+                raise ValueError("Each recommendation must be a JSON object.")
 
             risks = tuple(
                 RecommendationRisk(
@@ -311,13 +294,9 @@ Evidence:
                     rationale=item["rationale"],
                     target_version=item.get("target_version"),
                     target_dependency=item.get("target_dependency"),
-                    compatibility_notes=tuple(
-                        item.get("compatibility_notes", [])
-                    ),
+                    compatibility_notes=tuple(item.get("compatibility_notes", [])),
                     risks=risks,
-                    confidence=Confidence(
-                        item.get("confidence", "MEDIUM")
-                    ),
+                    confidence=Confidence(item.get("confidence", "MEDIUM")),
                     requires_manual_review=item.get(
                         "requires_manual_review",
                         True,

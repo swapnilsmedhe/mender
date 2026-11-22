@@ -77,7 +77,6 @@ class AIRecommendationContextBuilder:
                         omitted_count += 1
 
         candidates = self._deduplicate(candidates)
-
         included = []
 
         for location in candidates:
@@ -118,7 +117,6 @@ class AIRecommendationContextBuilder:
                 except ValueError:
                     if not included:
                         raise
-
                     included.pop()
                     omitted_count += 1
 
@@ -167,6 +165,14 @@ class AIRecommendationContextBuilder:
             version_source_resolved=(
                 version_source.resolved if version_source is not None else None
             ),
+            version_candidate_source_file=(
+                version_source.candidate_source_file
+                if version_source is not None
+                else None
+            ),
+            version_candidate_value=(
+                version_source.candidate_value if version_source is not None else None
+            ),
         )
 
     @staticmethod
@@ -189,6 +195,8 @@ class AIRecommendationContextBuilder:
                 location.version_source_file,
                 location.declared_version,
                 location.version_source_resolved,
+                location.version_candidate_source_file,
+                location.version_candidate_value,
             )
 
             if key not in seen:

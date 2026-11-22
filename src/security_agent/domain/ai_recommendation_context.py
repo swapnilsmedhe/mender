@@ -19,13 +19,10 @@ class ContextFact:
     def __post_init__(self) -> None:
         if not self.key.strip():
             raise ValueError("Context fact key cannot be empty.")
-
         if not self.value.strip():
             raise ValueError("Context fact value cannot be empty.")
-
         if len(self.key) > self.MAX_FIELD_LENGTH:
             raise ValueError("Context fact key is too long.")
-
         if len(self.value) > self.MAX_FIELD_LENGTH:
             raise ValueError("Context fact value is too long.")
 
@@ -44,6 +41,8 @@ class DependencyLocation:
     version_source_file: str | None = None
     declared_version: str | None = None
     version_source_resolved: bool | None = None
+    version_candidate_source_file: str | None = None
+    version_candidate_value: str | None = None
 
     MAX_PATH_ENTRIES: ClassVar[int] = 10
     MAX_FIELD_LENGTH: ClassVar[int] = 500
@@ -52,35 +51,27 @@ class DependencyLocation:
     def __post_init__(self) -> None:
         if not self.module_path.strip():
             raise ValueError("Module path cannot be empty.")
-
         if not self.manifest_file.strip():
             raise ValueError("Manifest file cannot be empty.")
-
         if not isinstance(self.relationship, DependencyRelationship):
             raise ValueError("Invalid dependency relationship.")
-
         if len(self.module_path) > self.MAX_FIELD_LENGTH:
             raise ValueError("Module path is too long.")
-
         if len(self.manifest_file) > self.MAX_FIELD_LENGTH:
             raise ValueError("Manifest file path is too long.")
 
         if self.lock_file is not None:
-            if not self.lock_file.strip():
-                raise ValueError("Lock file path cannot be empty.")
-
-            if len(self.lock_file) > self.MAX_FIELD_LENGTH:
-                raise ValueError("Lock file path is too long.")
+            self._validate_optional_text(
+                self.lock_file, "Lock file path", self.MAX_FIELD_LENGTH
+            )
 
         if len(self.dependency_path) > self.MAX_PATH_ENTRIES:
             raise ValueError("Dependency path contains too many entries.")
 
         for entry in self.dependency_path:
-            if not entry.strip():
-                raise ValueError("Dependency path entries cannot be empty.")
-
-            if len(entry) > self.MAX_FIELD_LENGTH:
-                raise ValueError("Dependency path entry is too long.")
+            self._validate_optional_text(
+                entry, "Dependency path entry", self.MAX_FIELD_LENGTH
+            )
 
         if self.declaration is not None:
             self._validate_optional_text(
@@ -95,15 +86,13 @@ class DependencyLocation:
             ("Version lookup scope", self.version_lookup_scope),
             ("Version source file", self.version_source_file),
             ("Declared version", self.declared_version),
+            ("Version candidate source file", self.version_candidate_source_file),
+            ("Version candidate value", self.version_candidate_value),
         )
 
         for label, value in optional_fields:
             if value is not None:
-                self._validate_optional_text(
-                    value,
-                    label,
-                    self.MAX_FIELD_LENGTH,
-                )
+                self._validate_optional_text(value, label, self.MAX_FIELD_LENGTH)
 
         if self.version_source_resolved is not None and not isinstance(
             self.version_source_resolved, bool
@@ -118,7 +107,6 @@ class DependencyLocation:
     ) -> None:
         if not value.strip():
             raise ValueError(f"{label} cannot be empty.")
-
         if len(value) > max_length:
             raise ValueError(f"{label} is too long.")
 
@@ -139,31 +127,22 @@ class AIRecommendationContext:
     def __post_init__(self) -> None:
         if not self.finding_id.strip():
             raise ValueError("Finding ID cannot be empty.")
-
         if not self.dependency_name.strip():
             raise ValueError("Dependency name cannot be empty.")
-
         if not self.resolved_version.strip():
             raise ValueError("Resolved version cannot be empty.")
-
-        if self.dependency_scope is not None:
-            if not self.dependency_scope.strip():
-                raise ValueError("Dependency scope cannot be empty.")
-
+        if self.dependency_scope is not None and not self.dependency_scope.strip():
+            raise ValueError("Dependency scope cannot be empty.")
         if len(self.locations) > self.MAX_LOCATIONS:
             raise ValueError("Too many dependency locations.")
-
         if len(self.facts) > self.MAX_FACTS:
             raise ValueError("Too many context facts.")
-
         if not all(
             isinstance(location, DependencyLocation) for location in self.locations
         ):
             raise ValueError("Invalid dependency location.")
-
         if not all(isinstance(fact, ContextFact) for fact in self.facts):
             raise ValueError("Invalid context fact.")
-
         if self.estimated_characters > self.MAX_CONTEXT_CHARACTERS:
             raise ValueError("AI recommendation context is too large.")
 
@@ -184,7 +163,6 @@ class AIRecommendationContext:
 
             if location.lock_file:
                 total += len(location.lock_file)
-
             if location.declaration:
                 total += len(location.declaration)
 
@@ -196,12 +174,12 @@ class AIRecommendationContext:
                 location.version_lookup_scope,
                 location.version_source_file,
                 location.declared_version,
+                location.version_candidate_source_file,
+                location.version_candidate_value,
             )
-
             total += sum(len(value) for value in optional_values if value is not None)
 
         for fact in self.facts:
-            total += len(fact.key)
-            total += len(fact.value)
+            total += len(fact.key) + len(fact.value)
 
         return total
