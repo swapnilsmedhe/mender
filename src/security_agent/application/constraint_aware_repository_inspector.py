@@ -223,13 +223,19 @@ class ConstraintAwareRepositoryInspector:
         declarations: list[SourceDeclaration] = []
         seen: set[tuple] = set()
 
-        constraints_by_source = {}
+        # IMPORTANT:
+        # A constraint source is scoped to the project whose Gradle
+        # configuration produced that constraint. Matching only by
+        # component coordinates incorrectly associates a BOM declaration
+        # in one module with constraints from other modules.
+        constraints_by_source: dict[tuple[str, str], list[DependencyConstraint]] = {}
 
         for constraint in constraints:
             key = self._component_key(constraint.source_component)
 
             if key is not None:
-                constraints_by_source.setdefault(key, []).append(constraint)
+                scoped_key = (constraint.module_path, key)
+                constraints_by_source.setdefault(scoped_key, []).append(constraint)
 
         for module_path, module_requests in requests.items():
             manifest_file = module_build_files.get(module_path)
@@ -267,8 +273,10 @@ class ConstraintAwareRepositoryInspector:
 
                 for evidence in evidence_items:
                     if evidence.declaration_kind == "PLATFORM":
+                        # Only constraints from the same module can
+                        # establish the provenance of this declaration.
                         related_constraints = constraints_by_source.get(
-                            evidence.dependency,
+                            (module_path, evidence.dependency),
                             (),
                         )
 
