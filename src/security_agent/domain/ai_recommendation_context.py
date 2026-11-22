@@ -17,10 +17,8 @@ class ContextFact:
     MAX_FIELD_LENGTH: ClassVar[int] = 1000
 
     def __post_init__(self) -> None:
-        if not self.key.strip():
-            raise ValueError("Context fact key cannot be empty.")
-        if not self.value.strip():
-            raise ValueError("Context fact value cannot be empty.")
+        if not self.key.strip() or not self.value.strip():
+            raise ValueError("Context fact fields cannot be empty.")
         if len(self.key) > self.MAX_FIELD_LENGTH:
             raise ValueError("Context fact key is too long.")
         if len(self.value) > self.MAX_FIELD_LENGTH:
@@ -112,6 +110,32 @@ class DependencyLocation:
 
 
 @dataclass(frozen=True)
+class DependencyConstraint:
+    module_path: str
+    manifest_file: str
+    source_component: str
+    requested: str
+    selected: str
+
+    MAX_FIELD_LENGTH: ClassVar[int] = 500
+
+    def __post_init__(self) -> None:
+        fields = (
+            ("Module path", self.module_path),
+            ("Manifest file", self.manifest_file),
+            ("Constraint source", self.source_component),
+            ("Requested component", self.requested),
+            ("Selected component", self.selected),
+        )
+
+        for label, value in fields:
+            if not value.strip():
+                raise ValueError(f"{label} cannot be empty.")
+            if len(value) > self.MAX_FIELD_LENGTH:
+                raise ValueError(f"{label} is too long.")
+
+
+@dataclass(frozen=True)
 class AIRecommendationContext:
     finding_id: str
     dependency_name: str
@@ -119,9 +143,11 @@ class AIRecommendationContext:
     dependency_scope: str | None = None
     locations: tuple[DependencyLocation, ...] = ()
     facts: tuple[ContextFact, ...] = ()
+    constraints: tuple[DependencyConstraint, ...] = ()
 
     MAX_LOCATIONS: ClassVar[int] = 20
     MAX_FACTS: ClassVar[int] = 30
+    MAX_CONSTRAINTS: ClassVar[int] = 20
     MAX_CONTEXT_CHARACTERS: ClassVar[int] = 12000
 
     def __post_init__(self) -> None:
@@ -133,16 +159,21 @@ class AIRecommendationContext:
             raise ValueError("Resolved version cannot be empty.")
         if self.dependency_scope is not None and not self.dependency_scope.strip():
             raise ValueError("Dependency scope cannot be empty.")
+
         if len(self.locations) > self.MAX_LOCATIONS:
             raise ValueError("Too many dependency locations.")
         if len(self.facts) > self.MAX_FACTS:
             raise ValueError("Too many context facts.")
-        if not all(
-            isinstance(location, DependencyLocation) for location in self.locations
-        ):
+        if len(self.constraints) > self.MAX_CONSTRAINTS:
+            raise ValueError("Too many dependency constraints.")
+
+        if not all(isinstance(item, DependencyLocation) for item in self.locations):
             raise ValueError("Invalid dependency location.")
-        if not all(isinstance(fact, ContextFact) for fact in self.facts):
+        if not all(isinstance(item, ContextFact) for item in self.facts):
             raise ValueError("Invalid context fact.")
+        if not all(isinstance(item, DependencyConstraint) for item in self.constraints):
+            raise ValueError("Invalid dependency constraint.")
+
         if self.estimated_characters > self.MAX_CONTEXT_CHARACTERS:
             raise ValueError("AI recommendation context is too large.")
 
@@ -178,6 +209,15 @@ class AIRecommendationContext:
                 location.version_candidate_value,
             )
             total += sum(len(value) for value in optional_values if value is not None)
+
+        for constraint in self.constraints:
+            total += (
+                len(constraint.module_path)
+                + len(constraint.manifest_file)
+                + len(constraint.source_component)
+                + len(constraint.requested)
+                + len(constraint.selected)
+            )
 
         for fact in self.facts:
             total += len(fact.key) + len(fact.value)
