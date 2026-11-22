@@ -15,6 +15,8 @@ class VersionSourceEvidence:
     value: str | None
     resolved: bool
     lookup_scope: str | None = None
+    candidate_source_file: str | None = None
+    candidate_value: str | None = None
 
 
 class GradleVersionSourceResolver:
@@ -22,7 +24,8 @@ class GradleVersionSourceResolver:
     Identifies how a directly declared Gradle dependency gets its version.
 
     This is source-level evidence, not a replacement for Gradle's
-    resolved dependency graph.
+    resolved dependency graph. Property values discovered in repository
+    files are candidates, not proof of Gradle's effective property value.
     """
 
     COORDINATE_PATTERN = re.compile(r"""['"]([^'"]+)['"]""")
@@ -72,18 +75,13 @@ class GradleVersionSourceResolver:
         ),
     )
 
-    FIND_PROPERTY_PATTERN = re.compile(
-        r"""
-        \b(?:rootProject|project)\.findProperty\(
-        \s*['"](?P<property>[^'"]+)['"]\s*
-        \)
-        """,
-        re.VERBOSE,
-    )
-
     INTERPOLATION_PATTERN = re.compile(
         r"^\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|"
         r"(?P<plain>[A-Za-z_][A-Za-z0-9_]*))$"
+    )
+
+    PROPERTY_LINE_PATTERN = re.compile(
+        r"^\s*(?P<key>[^#!\s:=]+)\s*(?:=|:|\s)\s*(?P<value>.*?)\s*$"
     )
 
     def __init__(self, tools: RepositoryTools) -> None:
@@ -128,6 +126,10 @@ class GradleVersionSourceResolver:
 
             if property_info is not None:
                 property_name, lookup_scope = property_info
+                candidate_file, candidate_value = (
+                    self._find_repository_property_candidate(property_name)
+                )
+
                 return VersionSourceEvidence(
                     dependency=f"{group}:{artifact}",
                     declaration=declaration,
@@ -137,6 +139,8 @@ class GradleVersionSourceResolver:
                     value=None,
                     resolved=False,
                     lookup_scope=lookup_scope,
+                    candidate_source_file=candidate_file,
+                    candidate_value=candidate_value,
                 )
 
             return VersionSourceEvidence(
@@ -150,6 +154,58 @@ class GradleVersionSourceResolver:
             )
 
         return None
+
+    def _find_repository_property_candidate(
+        self,
+        property_name: str,
+    ) -> tuple[str | None, str | None]:
+        """
+        Look for a candidate in the repository-root gradle.properties.
+
+        This deliberately does not claim to reproduce Gradle's complete
+        property precedence or effective runtime property resolution.
+        """
+        if self.tools is None:
+            return None, None
+
+        property_file = "gradle.properties"
+
+        try:
+            content = self.tools.read_file(property_file)
+        except (
+            FileNotFoundError,
+            OSError,
+            UnicodeError,
+            ValueError,
+        ):
+            return None, None
+
+        # RepositoryTools.read_file returns str. This guard also makes
+        # the resolver safe when a test double or alternate adapter
+        # returns an unconfigured or invalid value.
+        if not isinstance(content, str):
+            return None, None
+
+        candidate_value = None
+
+        for line in content.splitlines():
+            stripped = line.lstrip()
+
+            if not stripped or stripped.startswith(("#", "!")):
+                continue
+
+            match = self.PROPERTY_LINE_PATTERN.match(line)
+
+            if match is None:
+                continue
+
+            if match.group("key") == property_name:
+                candidate_value = match.group("value").strip()
+
+        if candidate_value is None:
+            return None, None
+
+        return property_file, candidate_value
 
     @classmethod
     def _find_property_variables(
