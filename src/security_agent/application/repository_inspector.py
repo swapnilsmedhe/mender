@@ -10,9 +10,9 @@ from security_agent.application.module_discovery import (
 from security_agent.domain.finding import SecurityFinding
 from security_agent.tools.repository import RepositoryTools
 from security_agent.application.gradle_dependency_report import (
-    GradleDependencyReportParser,
+    GradleDependencyGraph,
+    GradleDependencyReportCollector,
 )
-
 
 @dataclass(frozen=True)
 class ModuleMatch:
@@ -95,20 +95,24 @@ class RepositoryInspector:
     )
 
     def __init__(
-            self,
-            tools: RepositoryTools,
-            configuration: str = "runtimeClasspath",
-            timeout_seconds: int = 120,
+        self,
+        tools: RepositoryTools,
+        configuration: str = "runtimeClasspath",
+        timeout_seconds: int = 120,
     ) -> None:
         self.tools = tools
         self.configuration = configuration
         self.timeout_seconds = timeout_seconds
+
         self.discovery = GradleModuleDiscovery(
             tools,
             timeout_seconds=timeout_seconds,
         )
-        self.report_parser = GradleDependencyReportParser()
 
+        self.report_collector = GradleDependencyReportCollector(
+            tools,
+            timeout_seconds=timeout_seconds,
+        )
     
     def inspect(
         self,
@@ -116,35 +120,25 @@ class RepositoryInspector:
     ) -> RepositoryInspection:
         modules = self.discovery.discover()
 
-        direct_matches = []
-        transitive_matches = []
-        errors = []
-        outputs = []
-
         modules_with_build_files = [
             module for module in modules
             if module.build_file is not None
         ]
 
         if not modules_with_build_files:
-            errors.append(
-                "No Gradle projects with existing build files"
-            )
-
             return RepositoryInspection(
                 finding_id=finding.id,
                 configuration=self.configuration,
                 command_output="",
                 is_consistent=False,
-                errors=tuple(errors),
+                errors=("No Gradle projects with existing build files.",),
             )
 
-        inspected_module_count = 0
+        eligible_modules = []
+        outputs = []
 
         for module in modules_with_build_files:
-            # None means configuration information was not supplied
-            # by an older discovery result. In that case, preserve
-            # the previous behavior and attempt the inspection.
+            # Older discovery results may not contain configuration data.
             if (
                 module.configurations is not None
                 and self.configuration not in module.configurations
@@ -156,57 +150,100 @@ class RepositoryInspector:
                 )
                 continue
 
-            inspected_module_count += 1
+            eligible_modules.append(module)
 
-            try:
-                output = self._inspect_module(module, finding)
+        if not eligible_modules:
+            return RepositoryInspection(
+                finding_id=finding.id,
+                configuration=self.configuration,
+                command_output="\n".join(outputs),
+                is_consistent=False,
+                errors=(
+                    f"No Gradle projects expose the requested "
+                    f"configuration '{self.configuration}'.",
+                ),
+            )
 
-                outputs.append(
-                    f"Module {module.project_path}:\n{output}"
-                )
+        try:
+            report = self.report_collector.collect(
+                self.configuration,
+            )
+        except (RuntimeError, FileNotFoundError, ValueError) as exc:
+            return RepositoryInspection(
+                finding_id=finding.id,
+                configuration=self.configuration,
+                command_output="\n".join(outputs),
+                is_consistent=False,
+                errors=(str(exc),),
+            )
 
-                if not self._contains_finding(output, finding):
-                    continue
+        graph = GradleDependencyGraph(report)
 
-                resolved_version = self._extract_resolved_version(
-                    output,
-                    finding,
-                )
+        direct_matches = []
+        transitive_matches = []
+        errors = list(report.errors)
 
-                dependency_paths = self._extract_dependency_paths(
-                    output,
-                    finding,
-                )
+        for module in eligible_modules:
+            paths = graph.find_paths(
+                project_path=module.project_path,
+                target_component=finding.component,
+            )
 
-                try:
-                    content = self.tools.read_file(module.build_file)
-                except (FileNotFoundError, ValueError) as exc:
-                    errors.append(
-                        f"{module.project_path}: could not read "
-                        f"{module.build_file}: {exc}"
-                    )
-                    continue
+            # A path is relevant only when Gradle actually resolved
+            # the vulnerable version reported by the scanner.
+            vulnerable_paths = tuple(
+                path
+                for path in paths
+                if path
+                and self._path_resolved_version(path)
+                == finding.current_version
+            )
 
-                match = ModuleMatch(
+            if not vulnerable_paths:
+                continue
+
+            direct_paths = tuple(
+                path for path in vulnerable_paths
+                if len(path) == 1
+            )
+
+            transitive_paths = tuple(
+                path for path in vulnerable_paths
+                if len(path) > 1
+            )
+
+            def create_match(
+                dependency_paths: tuple[tuple[str, ...], ...],
+            ) -> ModuleMatch:
+                return ModuleMatch(
                     project_path=module.project_path,
                     build_file=module.build_file,
-                    command_output=output,
-                    resolved_version=resolved_version,
+                    command_output="\n".join(
+                        " -> ".join(path)
+                        for path in dependency_paths
+                    ),
+                    resolved_version=finding.current_version,
                     dependency_paths=dependency_paths,
                 )
 
-                if self._contains_direct_dependency(content, finding):
-                    direct_matches.append(match)
-                else:
-                    transitive_matches.append(match)
+            # A module can have both direct and transitive paths.
+            # Keep those relationships separate.
+            if direct_paths:
+                direct_matches.append(
+                    create_match(direct_paths)
+                )
 
-            except RuntimeError as exc:
-                errors.append(f"{module.project_path}: {exc}")
+            if transitive_paths:
+                transitive_matches.append(
+                    create_match(transitive_paths)
+                )
 
-        if inspected_module_count == 0:
-            errors.append(
-                f"No Gradle projects expose the requested "
-                f"configuration '{self.configuration}'."
+            outputs.append(
+                f"Module {module.project_path}:\n"
+                + "\n".join(
+                    "  " + " -> ".join(path)
+                    for path in vulnerable_paths
+                )
             )
 
         has_dependency_evidence = bool(
@@ -225,6 +262,21 @@ class RepositoryInspector:
             transitive_matches=tuple(transitive_matches),
         )
 
+
+    @staticmethod
+    def _path_resolved_version(
+            dependency_path: tuple[str, ...],
+    ) -> str | None:
+        if not dependency_path:
+            return None
+
+        target = dependency_path[-1]
+        parts = target.split(":")
+
+        if len(parts) < 3:
+            return None
+
+        return parts[-1]
 
     def _inspect_module(
             self,

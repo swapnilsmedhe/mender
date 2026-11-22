@@ -269,3 +269,242 @@ def test_multiple_direct_matches_are_consistent_when_no_errors(
     assert inspection.is_consistent
     assert len(inspection.matches) == 2
     assert not inspection.errors
+
+
+from security_agent.application.module_discovery import GradleModule
+from security_agent.application.gradle_dependency_report import (
+    GradleDependencyEdge,
+    GradleDependencyReport,
+)
+
+
+def create_report_edge(
+    project: str,
+    source: str,
+    selected: str,
+    *,
+    constraint: bool = False,
+) -> GradleDependencyEdge:
+    return GradleDependencyEdge(
+        project_path=project,
+        configuration="runtimeClasspath",
+        from_component=source,
+        requested=selected,
+        selected=selected,
+        is_constraint=constraint,
+        status="RESOLVED",
+    )
+
+
+def create_module(
+    project_path: str,
+) -> GradleModule:
+    name = project_path.split(":")[-1]
+
+    return GradleModule(
+        name=name,
+        project_path=project_path,
+        directory=name,
+        build_file=f"{name}/build.gradle.kts",
+        configurations=("runtimeClasspath",),
+    )
+
+
+def configure_inspector(
+    inspector,
+    modules,
+    report,
+):
+    inspector.discovery.discover = lambda: modules
+    inspector.report_collector.collect = lambda configuration: report
+
+
+def test_inspector_finds_direct_dependency(
+    finding,
+):
+    module = create_module(":service")
+
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_report_edge(
+                ":service",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+            ),
+        ),
+    )
+
+    inspector = RepositoryInspector(
+        tools=None,
+    )
+
+    configure_inspector(inspector, [module], report)
+
+    inspection = inspector.inspect(finding)
+
+    assert inspection.is_consistent
+    assert len(inspection.matches) == 1
+    assert inspection.transitive_matches == ()
+
+    assert inspection.matches[0].dependency_paths == (
+        (
+            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+        ),
+    )
+
+
+def test_inspector_finds_transitive_dependency(
+    finding,
+):
+    module = create_module(":integration")
+
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_report_edge(
+                ":integration",
+                "project :integration",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            ),
+            create_report_edge(
+                ":integration",
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+                "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+            ),
+        ),
+    )
+
+    inspector = RepositoryInspector(tools=None)
+    configure_inspector(inspector, [module], report)
+
+    inspection = inspector.inspect(finding)
+
+    assert inspection.is_consistent
+    assert inspection.matches == ()
+    assert len(inspection.transitive_matches) == 1
+
+    assert inspection.transitive_matches[0].dependency_paths == (
+        (
+            "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+        ),
+    )
+
+
+def test_inspector_preserves_direct_and_transitive_paths_in_same_module(
+    finding,
+):
+    module = create_module(":bom-consumer")
+
+    databind = (
+        "com.fasterxml.jackson.core:jackson-databind:2.15.2"
+    )
+    jsr310 = (
+        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4"
+    )
+    bom = "com.fasterxml.jackson:jackson-bom:2.13.4"
+
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_report_edge(
+                ":bom-consumer",
+                "project :bom-consumer",
+                databind,
+            ),
+            create_report_edge(
+                ":bom-consumer",
+                "project :bom-consumer",
+                jsr310,
+            ),
+            create_report_edge(
+                ":bom-consumer",
+                jsr310,
+                databind,
+            ),
+            create_report_edge(
+                ":bom-consumer",
+                "project :bom-consumer",
+                bom,
+            ),
+            create_report_edge(
+                ":bom-consumer",
+                bom,
+                databind,
+                constraint=True,
+            ),
+        ),
+    )
+
+    inspector = RepositoryInspector(tools=None)
+    configure_inspector(inspector, [module], report)
+
+    inspection = inspector.inspect(finding)
+
+    assert inspection.is_consistent
+    assert len(inspection.matches) == 1
+    assert len(inspection.transitive_matches) == 1
+
+    assert inspection.matches[0].dependency_paths == (
+        (databind,),
+    )
+
+    assert inspection.transitive_matches[0].dependency_paths == (
+        (jsr310, databind),
+    )
+
+
+def test_inspector_ignores_fixed_resolved_version(
+    finding,
+):
+    module = create_module(":service")
+
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_report_edge(
+                ":service",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.17.3",
+            ),
+        ),
+    )
+
+    inspector = RepositoryInspector(tools=None)
+    configure_inspector(inspector, [module], report)
+
+    inspection = inspector.inspect(finding)
+
+    assert not inspection.matches
+    assert not inspection.transitive_matches
+    assert not inspection.is_consistent
+
+
+def test_inspector_preserves_report_errors(
+    finding,
+):
+    module = create_module(":service")
+
+    report = GradleDependencyReport(
+        configuration="runtimeClasspath",
+        edges=(
+            create_report_edge(
+                ":service",
+                "project :service",
+                "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+            ),
+        ),
+        errors=(":integration (runtimeClasspath): resolution failed",),
+    )
+
+    inspector = RepositoryInspector(tools=None)
+    configure_inspector(inspector, [module], report)
+
+    inspection = inspector.inspect(finding)
+
+    assert len(inspection.matches) == 1
+    assert not inspection.is_consistent
+    assert inspection.errors == (
+        ":integration (runtimeClasspath): resolution failed",
+    )
