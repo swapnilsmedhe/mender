@@ -26,20 +26,15 @@ class GradleDependencyReport:
     errors: tuple[str, ...] = ()
 
 
-
 class GradleDependencyGraph:
-    """Find dependency paths within an individual Gradle project."""
+    """Find dependency paths and relevant constraints in a Gradle project."""
 
     def __init__(self, report: GradleDependencyReport) -> None:
         self.report = report
         self._adjacency: dict[tuple[str, str], list[str]] = {}
 
         for edge in report.edges:
-            if (
-                edge.status != "RESOLVED"
-                or edge.is_constraint
-                or edge.selected is None
-            ):
+            if edge.status != "RESOLVED" or edge.is_constraint or edge.selected is None:
                 continue
 
             key = (edge.project_path, edge.from_component)
@@ -102,6 +97,40 @@ class GradleDependencyGraph:
         visit(root, (), frozenset({root}))
         return tuple(paths)
 
+    def find_constraints(
+        self,
+        project_path: str,
+        target_component: str,
+    ) -> tuple[GradleDependencyEdge, ...]:
+        """
+        Return resolved Gradle constraints that select the target component.
+
+        Constraints are kept separate from dependency paths because a BOM
+        or platform influences version selection but is not necessarily
+        an ordinary dependency in the path to the vulnerable component.
+        """
+        if not project_path.strip():
+            raise ValueError("Project path cannot be empty.")
+
+        if not target_component.strip():
+            raise ValueError("Target component cannot be empty.")
+
+        constraints = []
+
+        for edge in self.report.edges:
+            if (
+                edge.project_path != project_path
+                or edge.status != "RESOLVED"
+                or not edge.is_constraint
+                or edge.selected is None
+            ):
+                continue
+
+            if self._matches_component(edge.selected, target_component):
+                constraints.append(edge)
+
+        return tuple(constraints)
+
     @staticmethod
     def _matches_component(
         resolved_component: str,
@@ -115,16 +144,11 @@ class GradleDependencyGraph:
                 return False
 
             return (
-                resolved_parts[0].casefold()
-                == target_parts[-2].casefold()
-                and resolved_parts[1].casefold()
-                == target_parts[-1].casefold()
+                resolved_parts[0].casefold() == target_parts[-2].casefold()
+                and resolved_parts[1].casefold() == target_parts[-1].casefold()
             )
 
-        return (
-            resolved_parts[-1].casefold()
-            == target_component.casefold()
-        )
+        return resolved_parts[-1].casefold() == target_component.casefold()
 
 
 class GradleDependencyReportCollector:
@@ -148,9 +172,7 @@ class GradleDependencyReportCollector:
         wrapper = root / wrapper_name
 
         if not wrapper.is_file():
-            raise FileNotFoundError(
-                f"Gradle wrapper not found: {wrapper}"
-            )
+            raise FileNotFoundError(f"Gradle wrapper not found: {wrapper}")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             script_path = Path(temp_dir) / "dependency-report.init.gradle"
@@ -179,17 +201,14 @@ class GradleDependencyReportCollector:
                     shell=False,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
-                    "Gradle dependency report timed out."
-                ) from exc
+                raise RuntimeError("Gradle dependency report timed out.") from exc
 
         output = f"{result.stdout}\n{result.stderr}"
         report = self.parse_output(output, configuration)
 
         if result.returncode != 0:
             raise RuntimeError(
-                "Gradle dependency report execution failed.\n"
-                f"{output.strip()}"
+                f"Gradle dependency report execution failed.\n{output.strip()}"
             )
 
         return report
@@ -249,9 +268,7 @@ class GradleDependencyReportCollector:
                 except (ValueError, UnicodeDecodeError):
                     continue
 
-                errors.append(
-                    f"{project_path} ({edge_configuration}): {message}"
-                )
+                errors.append(f"{project_path} ({edge_configuration}): {message}")
 
         return GradleDependencyReport(
             configuration=configuration,
