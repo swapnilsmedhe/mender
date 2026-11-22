@@ -11,10 +11,8 @@ from security_agent.infrastructure.ai.copilot_provider import (
 
 class ConstraintAwareCopilotRecommendationProvider(CopilotRecommendationProvider):
     """
-    Add structured Gradle constraint provenance to the Copilot prompt.
-
-    The underlying Copilot SDK integration and response parsing remain
-    unchanged.
+    Add Gradle constraint provenance and source declaration evidence
+    to the Copilot remediation reasoning prompt.
     """
 
     @staticmethod
@@ -43,42 +41,86 @@ class ConstraintAwareCopilotRecommendationProvider(CopilotRecommendationProvider
             for constraint in context.constraints
         ]
 
-        constraint_evidence = json.dumps(
-            constraints,
-            indent=2,
-        )
+        source_declarations = []
+
+        for fact in context.facts:
+            if not fact.key.startswith("source_declaration_"):
+                continue
+
+            try:
+                source_declarations.append(json.loads(fact.value))
+            except json.JSONDecodeError:
+                continue
 
         return f"""
 {prompt}
 
 ADDITIONAL FINDING-SPECIFIC GRADLE CONSTRAINT PROVENANCE:
 
-The following records describe resolved Gradle constraints that
-select the vulnerable component.
+{json.dumps(constraints, indent=2)}
 
-{constraint_evidence}
+SOURCE-LEVEL GRADLE DECLARATIONS:
 
-Interpretation rules:
-- "affected_module_manifest" is the build file of the affected module.
-  It is NOT necessarily the file that declared the constraint source.
-- "constraint_source_component" is the component from which the
-  constraint edge originates in Gradle's resolved graph.
-- "constraint_provenance_path" describes the ordinary dependency path
-  from the affected project to that source component.
-- "DIRECT" means the source component is a direct dependency of the
-  affected project in the resolved graph.
-- "TRANSITIVE" means the source component was reached through one or
-  more other resolved components.
-- "UNKNOWN" means Mender could not establish a provenance path.
-- A resolved graph path does not prove the exact source-code
-  declaration location. Do not invent one.
-- "selection_reason" describes Gradle's selection reason for the
-  selected component. Treat it as supporting evidence, not proof
-  that one constraint is the only version authority.
-- Compare a BOM/platform upgrade with upgrades to introducing
-  dependencies and direct dependency changes.
-- Do not assume a transitive BOM should be upgraded in the affected
-  module's build file.
-- If the evidence does not establish a safe remediation, identify
-  the specific additional evidence needed.
+{json.dumps(source_declarations, indent=2)}
+
+HOW TO REASON ABOUT THE EVIDENCE:
+
+1. Reconstruct the dependency flow for each affected module using
+   dependency paths, introducing dependency declarations, and
+   resolved Gradle constraints.
+
+2. Correlate declarations across paths. Multiple paths to the same
+   vulnerable component do not necessarily represent multiple
+   independent version sources.
+
+3. Look for a shared version authority. For example, if a module
+   declares one Jackson BOM and Gradle constraint provenance shows
+   that this BOM supplies the selected version of jackson-databind,
+   treat the BOM as a candidate shared control point for the
+   Jackson modules it constrains.
+
+4. If several transitive paths converge on the same BOM or platform,
+   explicitly consider upgrading that BOM once instead of proposing
+   separate overrides for every transitive path.
+
+5. Do not assume that a BOM controls every dependency merely because
+   it appears somewhere in the graph. Require matching component
+   coordinates and relevant Gradle constraint evidence.
+
+6. Distinguish a BOM declared directly by the affected module from
+   a BOM that arrives transitively through another dependency.
+   Do not recommend editing a transitive library's build file.
+
+7. Compare candidate remediation strategies:
+   - Upgrade the shared BOM or platform.
+   - Upgrade the direct introducing dependency.
+   - Upgrade a higher-level parent dependency.
+   - Upgrade the vulnerable component directly.
+   - Use a dependency constraint or override only when justified.
+
+8. Prefer the smallest change that fixes the vulnerable selected
+   version across all affected paths. Do not create one change per
+   path when a single shared source can explain those paths.
+
+9. A declaration's presence is source-level evidence. A Gradle
+   constraint edge is resolution evidence. A candidate property
+   value is not proof of the effective Gradle property value.
+   Keep these evidence types distinct.
+
+10. If one source appears to control multiple paths, explain exactly
+    which evidence supports that conclusion and which paths it covers.
+    If the evidence is incomplete, state what is missing instead of
+    presenting the source as confirmed.
+
+11. Do not claim a proposed upgrade is compatible or tested unless
+    the supplied evidence establishes that. Recommend targeted
+    compatibility checks where needed.
+
+12. Return multiple materially different remediation strategies
+    when evidence supports them, and rank them by safety and scope.
+    Do not return duplicate recommendations for the same underlying
+    source change.
+
+The affected dependency paths should be understood as a connected
+dependency graph, not as unrelated findings.
 """.strip()
