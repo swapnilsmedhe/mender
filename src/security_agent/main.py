@@ -7,6 +7,12 @@ from security_agent.application.ai_recommendation_service import (
 )
 from security_agent.application.analyzer import FindingAnalyzer
 from security_agent.application.change_preview import ChangePreviewEngine
+from security_agent.application.constraint_aware_context_builder import (
+    ConstraintAwareAIRecommendationContextBuilder,
+)
+from security_agent.application.constraint_aware_repository_inspector import (
+    ConstraintAwareRepositoryInspector,
+)
 from security_agent.application.orchestrator import (
     SecurityRemediationOrchestrator,
 )
@@ -19,8 +25,8 @@ from security_agent.domain.finding import (
     SecurityFinding,
     Severity,
 )
-from security_agent.infrastructure.ai.copilot_provider import (
-    CopilotRecommendationProvider,
+from security_agent.infrastructure.ai.constraint_aware_copilot_provider import (
+    ConstraintAwareCopilotRecommendationProvider,
 )
 from security_agent.tools.repository import RepositoryTools
 
@@ -241,10 +247,16 @@ def main() -> int:
             file=args.file,
         )
 
+        base_inspector = RepositoryInspector(
+            tools,
+            configuration=args.configuration,
+        )
+        inspector = ConstraintAwareRepositoryInspector(base_inspector)
+
         ai_service = None
 
         if args.ai:
-            provider = CopilotRecommendationProvider(
+            provider = ConstraintAwareCopilotRecommendationProvider(
                 model=args.ai_model,
                 timeout_seconds=args.ai_timeout,
             )
@@ -252,15 +264,13 @@ def main() -> int:
             ai_service = AIRecommendationService(
                 policy=AIAnalysisPolicy(),
                 provider=provider,
+                context_builder=ConstraintAwareAIRecommendationContextBuilder(),
             )
 
         orchestrator = SecurityRemediationOrchestrator(
             analyzer=FindingAnalyzer(),
             planner=RemediationPlanner(),
-            inspector=RepositoryInspector(
-                tools,
-                configuration=args.configuration,
-            ),
+            inspector=inspector,
             ai_recommendation_service=ai_service,
             force_ai=args.ai,
         )
