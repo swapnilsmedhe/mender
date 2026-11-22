@@ -9,6 +9,9 @@ from security_agent.application.module_discovery import (
 )
 from security_agent.domain.finding import SecurityFinding
 from security_agent.tools.repository import RepositoryTools
+from security_agent.application.gradle_dependency_report import (
+    GradleDependencyReportParser,
+)
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ class RepositoryInspector:
             tools,
             timeout_seconds=timeout_seconds,
         )
+        self.report_parser = GradleDependencyReportParser()
 
     
     def inspect(
