@@ -1,4 +1,3 @@
-
 import pytest
 
 from security_agent.application.repository_inspector import (
@@ -29,8 +28,8 @@ def finding():
 
 class TestResolvedDependencyVersion:
     def test_extracts_resolved_version(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2
@@ -41,27 +40,33 @@ com.fasterxml.jackson.core:jackson-databind:2.15.2
             finding,
         )
 
-        assert RepositoryInspector._extract_resolved_version(
-            output,
-            finding,
-        ) == "2.15.2"
+        assert (
+            RepositoryInspector._extract_resolved_version(
+                output,
+                finding,
+            )
+            == "2.15.2"
+        )
 
     def test_uses_selected_version_after_gradle_conflict_resolution(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2 -> 2.17.3
 """
 
-        assert RepositoryInspector._extract_resolved_version(
-            output,
-            finding,
-        ) == "2.17.3"
+        assert (
+            RepositoryInspector._extract_resolved_version(
+                output,
+                finding,
+            )
+            == "2.17.3"
+        )
 
     def test_does_not_report_finding_when_gradle_selected_a_fixed_version(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2 -> 2.17.3
@@ -73,8 +78,8 @@ com.fasterxml.jackson.core:jackson-databind:2.15.2 -> 2.17.3
         )
 
     def test_does_not_match_a_different_resolved_version(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.3
@@ -88,8 +93,8 @@ com.fasterxml.jackson.core:jackson-databind:2.15.3
 
 class TestDependencyPathExtraction:
     def test_extracts_transitive_dependency_path(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2
@@ -112,8 +117,8 @@ com.fasterxml.jackson.core:jackson-databind:2.15.2
         )
 
     def test_extracts_multiple_dependency_paths(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2
@@ -140,8 +145,8 @@ com.fasterxml.jackson.core:jackson-databind:2.15.2
         )
 
     def test_returns_empty_paths_when_gradle_does_not_report_a_tree(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.15.2
@@ -155,8 +160,8 @@ com.fasterxml.jackson.core:jackson-databind:2.15.2
         assert paths == ()
 
     def test_ignores_paths_for_a_different_resolved_version(
-            self,
-            finding,
+        self,
+        finding,
     ):
         output = """
 com.fasterxml.jackson.core:jackson-databind:2.17.3
@@ -236,7 +241,7 @@ class TestModuleMatchStructuredInformation:
         assert match.resolved_version is None
         assert match.dependency_paths == ()
 
-    
+
 def test_multiple_direct_matches_are_consistent_when_no_errors(
     finding,
 ):
@@ -348,9 +353,7 @@ def test_inspector_finds_direct_dependency(
     assert inspection.transitive_matches == ()
 
     assert inspection.matches[0].dependency_paths == (
-        (
-            "com.fasterxml.jackson.core:jackson-databind:2.15.2",
-        ),
+        ("com.fasterxml.jackson.core:jackson-databind:2.15.2",),
     )
 
 
@@ -397,12 +400,8 @@ def test_inspector_preserves_direct_and_transitive_paths_in_same_module(
 ):
     module = create_module(":bom-consumer")
 
-    databind = (
-        "com.fasterxml.jackson.core:jackson-databind:2.15.2"
-    )
-    jsr310 = (
-        "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4"
-    )
+    databind = "com.fasterxml.jackson.core:jackson-databind:2.15.2"
+    jsr310 = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4"
     bom = "com.fasterxml.jackson:jackson-bom:2.13.4"
 
     report = GradleDependencyReport(
@@ -446,13 +445,9 @@ def test_inspector_preserves_direct_and_transitive_paths_in_same_module(
     assert len(inspection.matches) == 1
     assert len(inspection.transitive_matches) == 1
 
-    assert inspection.matches[0].dependency_paths == (
-        (databind,),
-    )
+    assert inspection.matches[0].dependency_paths == ((databind,),)
 
-    assert inspection.transitive_matches[0].dependency_paths == (
-        (jsr310, databind),
-    )
+    assert inspection.transitive_matches[0].dependency_paths == ((jsr310, databind),)
 
 
 def test_inspector_ignores_fixed_resolved_version(
@@ -505,6 +500,4 @@ def test_inspector_preserves_report_errors(
 
     assert len(inspection.matches) == 1
     assert not inspection.is_consistent
-    assert inspection.errors == (
-        ":integration (runtimeClasspath): resolution failed",
-    )
+    assert inspection.errors == (":integration (runtimeClasspath): resolution failed",)

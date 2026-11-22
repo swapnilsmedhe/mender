@@ -22,3 +22,8 @@ class RemediationPlan:
     confidence: Confidence
     changes: list[FileChange] = field(default_factory=list)
     validation_steps: list[str] = field(default_factory=list)
+    manual_review_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def requires_manual_review(self) -> bool:
+        return bool(self.manual_review_reasons)

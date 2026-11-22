@@ -124,10 +124,14 @@ def print_remediation_plan(plan) -> None:
         for change in plan.changes:
             print(f"\nFile: {change.file}")
             print(f"Dependency: {change.dependency}")
-            print(
-                f"Version: {change.current_version}"
-                f" -> {change.target_version}"
-            )
+            print(f"Version: {change.current_version} -> {change.target_version}")
+
+    print(f"\nManual review required: {plan.requires_manual_review}")
+
+    if plan.manual_review_reasons:
+        print("Manual review items:")
+        for reason in plan.manual_review_reasons:
+            print(f"- {reason}")
 
     if plan.validation_steps:
         print("\nValidation steps:")
@@ -175,15 +179,10 @@ def print_ai_recommendations(orchestrator) -> None:
             print(f"Confidence: {recommendation.confidence.value}")
 
             if recommendation.target_dependency:
-                print(
-                    f"Target dependency: "
-                    f"{recommendation.target_dependency}"
-                )
+                print(f"Target dependency: {recommendation.target_dependency}")
 
             if recommendation.target_version:
-                print(
-                    f"Target version: {recommendation.target_version}"
-                )
+                print(f"Target version: {recommendation.target_version}")
 
             if recommendation.compatibility_notes:
                 print("Compatibility notes:")
@@ -193,14 +192,9 @@ def print_ai_recommendations(orchestrator) -> None:
             if recommendation.risks:
                 print("Risks:")
                 for risk in recommendation.risks:
-                    print(
-                        f"- {risk.level.value}: {risk.description}"
-                    )
+                    print(f"- {risk.level.value}: {risk.description}")
 
-            print(
-                "Manual review required: "
-                f"{recommendation.requires_manual_review}"
-            )
+            print(f"Manual review required: {recommendation.requires_manual_review}")
 
 
 def print_previews(previews) -> None:

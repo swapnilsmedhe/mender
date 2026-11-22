@@ -1,6 +1,6 @@
+from unittest.mock import Mock
 
 import pytest
-from unittest.mock import Mock
 
 from security_agent.application.orchestrator import (
     SecurityRemediationOrchestrator,
@@ -11,7 +11,10 @@ from security_agent.application.repository_inspector import (
 )
 from security_agent.domain.analysis import Confidence, RemediationType
 from security_agent.domain.finding import Scanner, SecurityFinding, Severity
-from security_agent.domain.remediation import RemediationPlan
+from security_agent.domain.remediation import (
+    FileChange,
+    RemediationPlan,
+)
 
 
 def make_finding():
@@ -29,9 +32,10 @@ def make_finding():
 
 
 def make_inspection(
-        is_consistent=True,
-        matches=None,
-        errors=(),
+    is_consistent=True,
+    matches=None,
+    errors=(),
+    transitive_matches=(),
 ):
     if matches is None and is_consistent:
         matches = (
@@ -49,6 +53,7 @@ def make_inspection(
         is_consistent=is_consistent,
         matches=tuple(matches or ()),
         errors=tuple(errors),
+        transitive_matches=tuple(transitive_matches),
     )
 
 
@@ -71,8 +76,16 @@ def orchestrator():
         remediation_type=RemediationType.VERSION_UPGRADE,
         reason="Upgrade vulnerable dependency",
         confidence=Confidence.HIGH,
+        changes=[
+            FileChange(
+                file="app/build.gradle",
+                dependency="jackson-databind",
+                current_version="2.15.2",
+                target_version="2.17.3",
+            )
+        ],
+        validation_steps=["./gradlew build"],
     )
-
     inspector.inspect.return_value = make_inspection()
 
     return SecurityRemediationOrchestrator(
@@ -105,8 +118,8 @@ def test_inconsistent_inspection_stops_workflow(orchestrator):
     )
 
     with pytest.raises(
-            ValueError,
-            match="Repository evidence is not conclusive",
+        ValueError,
+        match="Repository evidence is not conclusive",
     ):
         orchestrator.run(make_finding())
 
@@ -115,16 +128,13 @@ def test_inconsistent_inspection_stops_workflow(orchestrator):
 
 
 def test_planner_error_is_propagated(orchestrator):
-    orchestrator.planner.create_plan.side_effect = RuntimeError(
-        "Planner failed"
-    )
+    orchestrator.planner.create_plan.side_effect = RuntimeError("Planner failed")
 
     with pytest.raises(RuntimeError, match="Planner failed"):
         orchestrator.run(make_finding())
 
     orchestrator.analyzer.analyze.assert_called_once()
     orchestrator.planner.create_plan.assert_called_once()
-
 
 
 def test_multiple_matching_modules_are_processed(orchestrator):
@@ -153,15 +163,13 @@ def test_multiple_matching_modules_are_processed(orchestrator):
     assert orchestrator.planner.create_plan.call_count == 2
 
     analyzed_files = [
-        call.args[0].file
-        for call in orchestrator.analyzer.analyze.call_args_list
+        call.args[0].file for call in orchestrator.analyzer.analyze.call_args_list
     ]
 
     assert analyzed_files == [
         "app/build.gradle",
         "backend/build.gradle",
     ]
-
 
 
 def test_inspection_errors_stop_workflow(orchestrator):
@@ -171,13 +179,14 @@ def test_inspection_errors_stop_workflow(orchestrator):
     )
 
     with pytest.raises(
-            ValueError,
-            match="Gradle inspection timed out",
+        ValueError,
+        match="Gradle inspection timed out",
     ):
         orchestrator.run(make_finding())
 
     orchestrator.analyzer.analyze.assert_not_called()
     orchestrator.planner.create_plan.assert_not_called()
+
 
 def test_ai_recommendation_service_is_invoked(orchestrator):
     ai_service = Mock()
@@ -198,6 +207,7 @@ def test_ai_recommendation_service_is_invoked(orchestrator):
 
     assert len(orchestrator.ai_recommendation_outcomes) == 1
 
+
 def test_ai_failure_does_not_stop_deterministic_planning(orchestrator):
     ai_service = Mock()
     ai_service.recommend.return_value = Mock(
@@ -215,7 +225,7 @@ def test_ai_failure_does_not_stop_deterministic_planning(orchestrator):
 
 
 def test_ai_recommendation_is_invoked_once_for_multiple_modules(
-        orchestrator,
+    orchestrator,
 ):
     matches = (
         ModuleMatch(
@@ -250,19 +260,49 @@ def test_ai_recommendation_is_invoked_once_for_multiple_modules(
 
     orchestrator.run(make_finding())
 
-    # Deterministic analysis and planning remain module-specific.
     assert orchestrator.analyzer.analyze.call_count == 3
     assert orchestrator.planner.create_plan.call_count == 3
 
-    # AI analysis happens once for the complete repository finding.
     ai_service.recommend.assert_called_once()
 
     kwargs = ai_service.recommend.call_args.kwargs
 
     assert kwargs["finding"].id == "BD-12345"
-    assert kwargs["inspection"] == (
-        orchestrator.inspector.inspect.return_value
-    )
+    assert kwargs["inspection"] == (orchestrator.inspector.inspect.return_value)
 
     assert len(orchestrator.ai_recommendation_outcomes) == 1
 
+
+
+def test_transitive_only_finding_does_not_generate_automatic_changes(
+    orchestrator,
+):
+    transitive_match = ModuleMatch(
+        project_path=":integration",
+        build_file="integration/build.gradle.kts",
+        command_output="jsr310 -> jackson-databind",
+        dependency_paths=(
+            (
+                "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.13.4",
+                "com.fasterxml.jackson.core:jackson-databind:2.15.2",
+            ),
+        ),
+    )
+
+    orchestrator.inspector.inspect.return_value = make_inspection(
+        matches=(),
+        transitive_matches=(transitive_match,),
+    )
+
+    orchestrator.planner.create_plan.return_value = RemediationPlan(
+        finding_id="BD-12345",
+        remediation_type=RemediationType.NO_AUTOMATIC_REMEDIATION,
+        reason="Transitive dependency requires investigation.",
+        confidence=Confidence.MEDIUM,
+    )
+
+    result = orchestrator.run(make_finding())
+
+    assert result.remediation_type == RemediationType.NO_AUTOMATIC_REMEDIATION
+    assert result.changes == []
+    assert result.requires_manual_review

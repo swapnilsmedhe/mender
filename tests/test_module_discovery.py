@@ -26,15 +26,11 @@ def discovery(tmp_path):
         encoding="utf-8",
     )
 
-    return GradleModuleDiscovery(
-        RepositoryTools(tmp_path)
-    )
+    return GradleModuleDiscovery(RepositoryTools(tmp_path))
 
 
 def encode(value):
-    return base64.b64encode(
-        value.encode("utf-8")
-    ).decode("utf-8")
+    return base64.b64encode(value.encode("utf-8")).decode("utf-8")
 
 
 def test_discovers_single_module_project(discovery, tmp_path):
@@ -46,7 +42,7 @@ def test_discovers_single_module_project(discovery, tmp_path):
     )
 
     with patch(
-            "security_agent.application.module_discovery.subprocess.run"
+        "security_agent.application.module_discovery.subprocess.run"
     ) as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -76,29 +72,37 @@ def test_discovers_multiple_modules(discovery, tmp_path):
     app_build.write_text("plugins {}\n", encoding="utf-8")
     service_build.write_text("plugins {}\n", encoding="utf-8")
 
-    output = "\n".join([
-        "\t".join([
-            "SECURITY_AGENT_PROJECT",
-            encode(":"),
-            encode(str(tmp_path)),
-            encode(str(tmp_path / "build.gradle")),
-        ]),
-        "\t".join([
-            "SECURITY_AGENT_PROJECT",
-            encode(":app"),
-            encode(str(app_dir)),
-            encode(str(app_build)),
-        ]),
-        "\t".join([
-            "SECURITY_AGENT_PROJECT",
-            encode(":service"),
-            encode(str(service_dir)),
-            encode(str(service_build)),
-        ]),
-    ])
+    output = "\n".join(
+        [
+            "\t".join(
+                [
+                    "SECURITY_AGENT_PROJECT",
+                    encode(":"),
+                    encode(str(tmp_path)),
+                    encode(str(tmp_path / "build.gradle")),
+                ]
+            ),
+            "\t".join(
+                [
+                    "SECURITY_AGENT_PROJECT",
+                    encode(":app"),
+                    encode(str(app_dir)),
+                    encode(str(app_build)),
+                ]
+            ),
+            "\t".join(
+                [
+                    "SECURITY_AGENT_PROJECT",
+                    encode(":service"),
+                    encode(str(service_dir)),
+                    encode(str(service_build)),
+                ]
+            ),
+        ]
+    )
 
     with patch(
-            "security_agent.application.module_discovery.subprocess.run"
+        "security_agent.application.module_discovery.subprocess.run"
     ) as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -122,7 +126,7 @@ def test_discovers_multiple_modules(discovery, tmp_path):
 
 def test_discovery_fails_when_gradle_fails(discovery):
     with patch(
-            "security_agent.application.module_discovery.subprocess.run"
+        "security_agent.application.module_discovery.subprocess.run"
     ) as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -132,15 +136,15 @@ def test_discovery_fails_when_gradle_fails(discovery):
         )
 
         with pytest.raises(
-                RuntimeError,
-                match="Gradle module discovery failed",
+            RuntimeError,
+            match="Gradle module discovery failed",
         ):
             discovery.discover()
 
 
 def test_discovery_fails_when_no_projects_found(discovery):
     with patch(
-            "security_agent.application.module_discovery.subprocess.run"
+        "security_agent.application.module_discovery.subprocess.run"
     ) as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -150,27 +154,29 @@ def test_discovery_fails_when_no_projects_found(discovery):
         )
 
         with pytest.raises(
-                RuntimeError,
-                match="no projects were discovered",
+            RuntimeError,
+            match="no projects were discovered",
         ):
             discovery.discover()
 
 
 def test_discovery_rejects_project_outside_repository(
-        discovery,
-        tmp_path,
+    discovery,
+    tmp_path,
 ):
     outside = tmp_path.parent / "outside"
 
-    output = "\t".join([
-        "SECURITY_AGENT_PROJECT",
-        encode(":external"),
-        encode(str(outside)),
-        encode(str(outside / "build.gradle")),
-    ])
+    output = "\t".join(
+        [
+            "SECURITY_AGENT_PROJECT",
+            encode(":external"),
+            encode(str(outside)),
+            encode(str(outside / "build.gradle")),
+        ]
+    )
 
     with patch(
-            "security_agent.application.module_discovery.subprocess.run"
+        "security_agent.application.module_discovery.subprocess.run"
     ) as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
@@ -180,20 +186,22 @@ def test_discovery_rejects_project_outside_repository(
         )
 
         with pytest.raises(
-                ValueError,
-                match="outside repository",
+            ValueError,
+            match="outside repository",
         ):
             discovery.discover()
 
 
 def test_parses_project_configurations(discovery, tmp_path):
-    output = "\t".join([
-        "SECURITY_AGENT_PROJECT",
-        encode(":service"),
-        encode(str(tmp_path)),
-        encode(str(tmp_path / "build.gradle")),
-        encode("compileClasspath,runtimeClasspath,testRuntimeClasspath"),
-    ])
+    output = "\t".join(
+        [
+            "SECURITY_AGENT_PROJECT",
+            encode(":service"),
+            encode(str(tmp_path)),
+            encode(str(tmp_path / "build.gradle")),
+            encode("compileClasspath,runtimeClasspath,testRuntimeClasspath"),
+        ]
+    )
 
     modules = discovery._parse_output(output, tmp_path)
 
@@ -209,13 +217,15 @@ def test_parses_project_without_runtime_classpath(
     discovery,
     tmp_path,
 ):
-    output = "\t".join([
-        "SECURITY_AGENT_PROJECT",
-        encode(":"),
-        encode(str(tmp_path)),
-        encode(str(tmp_path / "build.gradle")),
-        encode("archives,default"),
-    ])
+    output = "\t".join(
+        [
+            "SECURITY_AGENT_PROJECT",
+            encode(":"),
+            encode(str(tmp_path)),
+            encode(str(tmp_path / "build.gradle")),
+            encode("archives,default"),
+        ]
+    )
 
     modules = discovery._parse_output(output, tmp_path)
 
